@@ -1,0 +1,18 @@
+[project]
+name = "my-personal-ia-shopper"
+version = "0.1.0"
+description = "Personal AI Shopper — agente di moda personale"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "browser-use>=0.13.1",
+    "curl-cffi>=0.15.0",
+    "langchain-anthropic>=1.3.1",
+    "playwright>=1.60.0",
+]
+
+[project.scripts]
+shopper = "Ia_personal_shopper.__main__:main_sync"
+
+[tool.uv]
+package = true
