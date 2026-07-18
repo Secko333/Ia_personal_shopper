@@ -24,26 +24,34 @@ _TASK_BUILDERS = {
 _SITI_BROWSER = set(_TASK_BUILDERS)
 _SITI_API = {"vinted"}
 
+# Vinted catalog_ids per la sezione uomo/donna (verificato via API: 5=Uomo, 1904=Donna).
+_CATALOG_ID_GENERE = {"uomo": "5", "donna": "1904"}
+
 
 async def _esegui_ricerca_sito(
     sito: str,
     query: str,
     budget: float | None,
     profilo: ProfiloUtente,
+    genere: str | None = None,
 ) -> list[ProdottoRisultato]:
     """Cerca su un singolo sito. Vinted via API JSON, gli altri via browser-use."""
     # Vinted: API JSON (veloce, gratis). curl_cffi è sincrono → gira in un thread.
     if sito == "vinted":
         taglie = [t for t in (profilo.taglie.top, profilo.taglie.pantaloni, profilo.taglie.scarpe) if t]
         return await asyncio.to_thread(
-            vinted_api.cerca_vinted, query, budget, taglie=taglie or None
+            vinted_api.cerca_vinted,
+            query,
+            budget,
+            taglie=taglie or None,
+            catalog_ids=_CATALOG_ID_GENERE.get(genere),
         )
 
     # Delay casuale anti-bot per sfasare i lanci dei browser
     await asyncio.sleep(random.uniform(DELAY_MIN_AGENTE, DELAY_MAX_AGENTE))
 
     builder = _TASK_BUILDERS[sito]
-    task_str = builder(query, budget, profilo)
+    task_str = builder(query, budget, profilo, genere)
 
     agente = crea_agente_ricerca(sito, task_str)
     history = await agente.run(max_steps=MAX_STEPS_RICERCA)
@@ -63,6 +71,7 @@ async def cerca_su_tutti_i_siti(
     query: str,
     budget: float | None,
     profilo: ProfiloUtente,
+    genere: str | None = None,
 ) -> list[ProdottoRisultato]:
     """
     Lancia ricerche in parallelo su tutti i siti attivi nel profilo.
@@ -71,7 +80,7 @@ async def cerca_su_tutti_i_siti(
     siti_attivi = [s for s in profilo.siti_attivi if s in _SITI_BROWSER or s in _SITI_API]
 
     tasks = [
-        _esegui_ricerca_sito(sito, query, budget, profilo)
+        _esegui_ricerca_sito(sito, query, budget, profilo, genere)
         for sito in siti_attivi
     ]
 

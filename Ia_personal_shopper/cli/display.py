@@ -166,6 +166,7 @@ def stampa_profilo(profilo: ProfiloUtente) -> None:
         + f"\n\n[underline]Stile preferito:[/underline] {stili}"
         f"\n[underline]Gusti — piacciono:[/underline] {gusti_pos}"
         f"\n[underline]Gusti — da evitare:[/underline] {gusti_neg}"
+        f"\n[underline]Genere:[/underline] {profilo.genere or 'nessun filtro'}"
         f"\n[underline]Budget default:[/underline] €{profilo.budget_default:.0f}"
         f"\n[underline]Siti attivi:[/underline] {siti}"
     )

@@ -66,21 +66,49 @@ def filtra_e_ordina(
     return (con_prezzo + senza_prezzo)[:MAX_RISULTATI_TOTALI]
 
 
+_PATTERN_BUDGET = re.compile(
+    r"(?:max(?:imo)?|meno di|entro|budget|fino a|sotto|non\s+sopra)\s*[:i]?\s*(\d+(?:[.,]\d+)?)\s*€?",
+    re.IGNORECASE,
+)
+_PATTERN_BUDGET_FALLBACK = re.compile(r"(\d+(?:[.,]\d+)?)\s*€", re.IGNORECASE)
+
+
 def estrai_budget(testo: str) -> float | None:
     """Estrae il budget massimo da un testo libero in italiano."""
-    pattern = re.compile(
-        r"(?:max(?:imo)?|meno di|entro|budget|fino a|sotto)\s*[:i]?\s*(\d+(?:[.,]\d+)?)\s*€?",
-        re.IGNORECASE,
-    )
-    match = pattern.search(testo)
+    match = _PATTERN_BUDGET.search(testo)
     if match:
-        valore = match.group(1).replace(",", ".")
-        return float(valore)
+        return float(match.group(1).replace(",", "."))
 
-    # Fallback: cerca pattern "N€" o "€N" standalone
-    pattern2 = re.compile(r"(\d+(?:[.,]\d+)?)\s*€", re.IGNORECASE)
-    match2 = pattern2.search(testo)
+    match2 = _PATTERN_BUDGET_FALLBACK.search(testo)
     if match2:
         return float(match2.group(1).replace(",", "."))
 
     return None
+
+
+def pulisci_query(testo: str) -> str:
+    """Rimuove la frase di budget dal testo libero, lasciando solo le parole chiave.
+
+    Query come 'jeans bootcut non sopra i 40 euro' altrimenti vengono passate per intero
+    come search_text a Vinted, e le parole extra (non/sopra/euro) degradano la ricerca.
+    """
+    pulita = _PATTERN_BUDGET.sub(" ", testo)
+    pulita = _PATTERN_BUDGET_FALLBACK.sub(" ", pulita)
+    pulita = re.sub(r"\beuro\b", " ", pulita, flags=re.IGNORECASE)
+    pulita = re.sub(r"\s+", " ", pulita).strip()
+    return pulita if pulita else testo
+
+
+_PATTERN_UOMO = re.compile(r"\b(?:da\s+)?uomo\b", re.IGNORECASE)
+_PATTERN_DONNA = re.compile(r"\b(?:da\s+)?donna\b", re.IGNORECASE)
+
+
+def rileva_genere(testo: str, default: str | None = None) -> str | None:
+    """Rileva 'uomo'/'donna' esplicito nella query; se assente o ambiguo usa il default del profilo."""
+    uomo = bool(_PATTERN_UOMO.search(testo))
+    donna = bool(_PATTERN_DONNA.search(testo))
+    if uomo and not donna:
+        return "uomo"
+    if donna and not uomo:
+        return "donna"
+    return default

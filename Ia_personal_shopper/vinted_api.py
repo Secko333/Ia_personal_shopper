@@ -15,7 +15,7 @@ import time
 
 from curl_cffi import requests
 
-from Ia_personal_shopper.config import MAX_RISULTATI_PER_SITO
+from Ia_personal_shopper.config import BROWSER_DATA_DIR, MAX_RISULTATI_PER_SITO
 from Ia_personal_shopper.models import ProdottoRisultato
 
 _META_DESC = re.compile(r'<meta name="description" content="([^"]*)"')
@@ -23,14 +23,49 @@ _META_DESC = re.compile(r'<meta name="description" content="([^"]*)"')
 BASE = "https://www.vinted.it"
 ENDPOINT_ITEMS = f"{BASE}/api/v2/catalog/items"
 
+# Cookie di autenticazione Vinted (JWT-based): se presenti nel profilo browser persistente
+# di /carrello, identificano l'utente loggato. Riusarli qui rende autenticate anche le ricerche.
+_COOKIE_AUTH = {"access_token_web", "refresh_token_web"}
+
 # ponytail: sessione module-level riusata tra ricerche; ri-warm solo su 403.
 _session = None
+
+
+def _cookie_da_browser() -> list[dict] | None:
+    """Legge i cookie di sessione dal profilo Chromium persistente usato da /carrello.
+
+    Se l'utente si è loggato manualmente in quella finestra (browser-use, headful),
+    i cookie restano salvati su disco: li leggiamo con un contesto Playwright headless
+    e li trapiantiamo nella sessione curl_cffi per autenticare anche le ricerche via API.
+    Nessuna password è letta o salvata: solo i cookie di sessione già presenti sul disco.
+    """
+    profilo_dir = BROWSER_DATA_DIR / "vinted"
+    if not profilo_dir.exists():
+        return None
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            context = p.chromium.launch_persistent_context(str(profilo_dir), headless=True)
+            try:
+                return context.cookies("https://www.vinted.it")
+            finally:
+                context.close()
+    except Exception:
+        # Profilo assente, in uso da un altro processo, o Playwright non disponibile:
+        # si prosegue in modalità anonima.
+        return None
 
 
 def _warm():
     """Crea una sessione con fingerprint Chrome e ottiene i cookie di Vinted/DataDome."""
     s = requests.Session(impersonate="chrome")
     s.get(BASE, timeout=15)  # popola _vinted_fr_session + cookie DataDome
+
+    for cookie in _cookie_da_browser() or []:
+        if cookie.get("name") in _COOKIE_AUTH:
+            s.cookies.set(cookie["name"], cookie["value"], domain=cookie.get("domain") or ".vinted.it")
+
     return s
 
 

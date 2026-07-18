@@ -70,6 +70,7 @@ class ProfiloUtente(BaseModel):
     nome: str = "Utente"
     fisico: FisicoUtente = Field(default_factory=FisicoUtente)
     taglie: TaglieUtente = Field(default_factory=TaglieUtente)
+    genere: str | None = None                # "uomo" | "donna" | None (nessun filtro)
     preferenze_stile: list[str] = Field(default_factory=list)
     gusti_positivi: list[str] = Field(default_factory=list)   # appreso da feedback/foto: cosa piace
     gusti_negativi: list[str] = Field(default_factory=list)   # appreso da feedback: cosa evitare

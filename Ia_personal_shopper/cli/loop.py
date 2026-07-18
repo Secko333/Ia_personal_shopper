@@ -29,7 +29,7 @@ from Ia_personal_shopper.profilo.gestore import (
     carica_profilo,
     salva_profilo,
 )
-from Ia_personal_shopper.ricerca.aggregatore import estrai_budget
+from Ia_personal_shopper.ricerca.aggregatore import estrai_budget, pulisci_query, rileva_genere
 from Ia_personal_shopper.ricerca.coordinatore import cerca_su_tutti_i_siti
 from Ia_personal_shopper.valutazione.consulente import valuta_prodotti
 from Ia_personal_shopper.vision.analizzatore import descrivi_immagine, estrai_stile_da_immagine
@@ -51,6 +51,8 @@ async def _cmd_ricerca(testo: str) -> None:
 
     profilo = carica_profilo()
     budget = estrai_budget(testo)
+    query = pulisci_query(testo)
+    genere = rileva_genere(testo, default=profilo.genere)
 
     # Usa budget default del profilo se non specificato nella query
     if budget is None and profilo.budget_default:
@@ -61,9 +63,11 @@ async def _cmd_ricerca(testo: str) -> None:
     console.print(f"\n[cyan]🔍 Cerco su {siti_str}...[/cyan]")
     if budget:
         console.print(f"[dim]Budget massimo: €{budget:.0f}[/dim]")
+    if genere:
+        console.print(f"[dim]Genere: {genere}[/dim]")
 
     with Status("[cyan]Navigazione in corso...[/cyan]", console=console):
-        prodotti_raw = await cerca_su_tutti_i_siti(testo, budget, profilo)
+        prodotti_raw = await cerca_su_tutti_i_siti(query, budget, profilo, genere)
 
     if not prodotti_raw:
         console.print("[yellow]Nessun risultato. Prova con parole diverse o amplia il budget.[/yellow]")
@@ -352,6 +356,12 @@ def _cmd_profilo_modifica() -> None:
 
     # Stile e budget
     console.print("\n[underline]Preferenze[/underline]")
+    genere_str = Prompt.ask(
+        "  Genere per il filtro ricerche (uomo/donna, Invio per nessun filtro)",
+        default=profilo.genere or "",
+    ).strip().lower()
+    profilo.genere = genere_str if genere_str in ("uomo", "donna") else None
+
     stili_str = Prompt.ask(
         "  Stili preferiti (separati da virgola)",
         default=", ".join(profilo.preferenze_stile),
