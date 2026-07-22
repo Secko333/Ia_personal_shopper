@@ -26,6 +26,14 @@ class RisultatiRicerca(BaseModel):
     prodotti: list[ProdottoRisultato] = Field(default_factory=list)
 
 
+class ParametriRicerca(BaseModel):
+    """Parametri strutturati estratti dalla richiesta in linguaggio naturale (vedi ricerca/interprete.py)."""
+    query: str
+    tipo_capo: str = "altro"                          # "top" | "pantaloni" | "scarpe" | "altro"
+    colori: list[str] = Field(default_factory=list)   # nomi colore italiani mappabili su color_ids Vinted
+    genere: str | None = None                         # "uomo" | "donna" | None
+
+
 # ---------------------------------------------------------------------------
 # Valutazione editoriale di ogni prodotto
 # ---------------------------------------------------------------------------

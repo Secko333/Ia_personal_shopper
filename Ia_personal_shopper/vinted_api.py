@@ -123,17 +123,24 @@ def _descrizione_da_pagina(session, url: str) -> str | None:
     return None
 
 
+# Token alfabetici che contano come taglia (le altre parole del profilo, es. "di vita", si ignorano).
+_TAGLIE_ALPHA = {"xs", "s", "m", "l", "xl", "xxl", "xxxl"}
+
+
 def _taglia_compatibile(size_title: str | None, taglie: list[str]) -> bool:
     """Filtro morbido: True se la taglia del capo matcha una taglia utente o è assente.
 
-    size_title su Vinted è tipo "M / IT 48 / EU 44": si confronta per token,
-    così "M" matcha "M / IT 48" e "42" matcha "IT 42".
+    Entrambi i lati sono ridotti a token atomici ("W32 | IT 46" → w, 32, it, 46), così
+    "32" matcha "W32" e il testo libero del profilo ("32 di vita 36/38") non scarta tutto.
     """
     if not size_title:
         return True
-    tokens = {t.strip().lower() for t in re.split(r"[/|,]", size_title)}
-    tokens |= set(size_title.lower().split())
-    return any(t.strip().lower() in tokens for t in taglie if t)
+    tokens_capo = set(re.findall(r"[a-z]+|\d+", size_title.lower()))
+    for taglia in taglie:
+        for tok in re.findall(r"[a-z]+|\d+", (taglia or "").lower()):
+            if (tok.isdigit() or tok in _TAGLIE_ALPHA) and tok in tokens_capo:
+                return True
+    return False
 
 
 def cerca_vinted(
@@ -145,12 +152,14 @@ def cerca_vinted(
     taglie: list[str] | None = None,
     escludi_condizione_scarsa: bool = False,
     catalog_ids: str | None = None,
+    color_ids: str | None = None,
 ) -> list[ProdottoRisultato]:
     """Cerca articoli su Vinted via API JSON. Ritorna al massimo `per_page` prodotti.
 
     taglie: filtro morbido post-fetch sulle taglie utente (i capi senza taglia passano).
     escludi_condizione_scarsa: scarta gli articoli in stato "Soddisfacente".
     catalog_ids: ID categoria Vinted (es. uomo) passato all'API, opzionale.
+    color_ids: ID colore Vinted in CSV (vedi ricerca/interprete.py), opzionale.
     """
     # I filtri post-fetch riducono i risultati → si chiede una pagina più larga e si tronca dopo.
     filtri_attivi = bool(taglie or escludi_condizione_scarsa)
@@ -164,6 +173,8 @@ def cerca_vinted(
         params["price_to"] = int(budget)
     if catalog_ids:
         params["catalog_ids"] = catalog_ids
+    if color_ids:
+        params["color_ids"] = color_ids
 
     session = _get_session()
     r = session.get(ENDPOINT_ITEMS, params=params, timeout=20)
@@ -197,6 +208,9 @@ if __name__ == "__main__":
     assert _taglia_compatibile("IT 42", ["42"])
     assert _taglia_compatibile(None, ["M"])
     assert not _taglia_compatibile("12 anni / 152 cm", ["M", "32", "42"])
+    assert _taglia_compatibile("W32 | IT 46", ["32 di vita 36/38 di lunghezza"])
+    assert not _taglia_compatibile("W28 | IT 42", ["32 di vita 36/38 di lunghezza"])
+    assert not _taglia_compatibile("Taglia unica", ["l", "32 di vita 36/38 di lunghezza", "47"])
 
     risultati = cerca_vinted("nike", budget=40, arricchisci_descrizioni=False)
     for p in risultati[:5]:

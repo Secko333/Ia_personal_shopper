@@ -28,7 +28,7 @@ DOMINI_SITI = {
 
 # Limiti agente
 MAX_STEPS_RICERCA = 25
-MAX_RISULTATI_PER_SITO = 8
+MAX_RISULTATI_PER_SITO = 12
 MAX_RISULTATI_TOTALI = 20
 
 # Delay iniziale tra lanci agenti (anti-bot, in secondi)

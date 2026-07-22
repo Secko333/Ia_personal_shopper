@@ -76,11 +76,11 @@ def stampa_risultati(prodotti: list[ProdottoArricchito], query: str) -> None:
         colore_sito = COLORI_SITO.get(p.sito, "white")
         sito_text = Text(f"{icona} {p.sito.capitalize()}", style=colore_sito)
 
-        # Colonna prodotto
+        # Colonna prodotto (nome cliccabile: terminale con supporto hyperlink → apre l'URL)
         nome = p.nome[:60] + "…" if len(p.nome) > 60 else p.nome
         brand = f"\n[dim]{p.brand}[/dim]" if p.brand else ""
         condizione = f"\n[dim italic]{p.condizione}[/dim italic]" if p.condizione else ""
-        prodotto_text = Text.from_markup(f"{nome}{brand}{condizione}")
+        prodotto_text = Text.from_markup(f"[link={p.url}]{nome}[/link]{brand}{condizione}")
 
         # Colonna prezzo
         if p.prezzo is not None:
@@ -114,7 +114,8 @@ def stampa_risultati(prodotti: list[ProdottoArricchito], query: str) -> None:
 
     console.print(table)
     console.print(
-        "\n[dim]Comandi: [bold]/salva N[/bold] salva preferito · "
+        "\n[dim]Comandi: [bold]/link N[/bold] mostra l'URL · "
+        "[bold]/salva N[/bold] salva preferito · "
         "[bold]/carrello N[/bold] aggiunge al carrello · "
         "[bold]/aiuto[/bold] tutti i comandi[/dim]"
     )
@@ -227,6 +228,7 @@ def stampa_aiuto() -> None:
         "  [cyan]/profilo modifica[/cyan] → Modifica misure e preferenze\n"
         "  [cyan]/siti[/cyan]             → Gestisci i siti di ricerca\n"
         "  [cyan]/preferiti[/cyan]        → Articoli salvati\n"
+        "  [cyan]/link N[/cyan]           → Mostra l'URL del prodotto N\n"
         "  [cyan]/salva N[/cyan]          → Salva il prodotto N tra i preferiti\n"
         "  [cyan]/carrello N[/cyan]       → Aggiungi il prodotto N al carrello\n"
         "  [cyan]/aiuto[/cyan]            → Questo messaggio\n"

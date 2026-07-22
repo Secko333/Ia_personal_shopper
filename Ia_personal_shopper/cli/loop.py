@@ -29,8 +29,9 @@ from Ia_personal_shopper.profilo.gestore import (
     carica_profilo,
     salva_profilo,
 )
-from Ia_personal_shopper.ricerca.aggregatore import estrai_budget, pulisci_query, rileva_genere
+from Ia_personal_shopper.ricerca.aggregatore import estrai_budget
 from Ia_personal_shopper.ricerca.coordinatore import cerca_su_tutti_i_siti
+from Ia_personal_shopper.ricerca.interprete import interpreta_ricerca, taglie_per_tipo
 from Ia_personal_shopper.valutazione.consulente import valuta_prodotti
 from Ia_personal_shopper.vision.analizzatore import descrivi_immagine, estrai_stile_da_immagine
 
@@ -51,23 +52,33 @@ async def _cmd_ricerca(testo: str) -> None:
 
     profilo = carica_profilo()
     budget = estrai_budget(testo)
-    query = pulisci_query(testo)
-    genere = rileva_genere(testo, default=profilo.genere)
 
     # Usa budget default del profilo se non specificato nella query
     if budget is None and profilo.budget_default:
         budget = profilo.budget_default
         console.print(f"[dim]Budget non specificato, uso il default del profilo: €{budget:.0f}[/dim]")
 
+    with Status("[cyan]Interpreto la richiesta...[/cyan]", console=console):
+        params = await interpreta_ricerca(testo, profilo)
+
+    # Mostra come è stata interpretata la richiesta
+    dettagli = [f"cerco '[bold]{params.query}[/bold]'"]
+    if params.colori:
+        dettagli.append(f"colore: {', '.join(params.colori)}")
+    taglie = taglie_per_tipo(params.tipo_capo, profilo)
+    if taglie:
+        dettagli.append(f"taglia {params.tipo_capo}: {taglie[0]}")
+    if params.genere:
+        dettagli.append(params.genere)
+    if budget:
+        dettagli.append(f"max €{budget:.0f}")
+    console.print(f"[dim]🧠 {' · '.join(dettagli)}[/dim]")
+
     siti_str = ", ".join(profilo.siti_attivi)
     console.print(f"\n[cyan]🔍 Cerco su {siti_str}...[/cyan]")
-    if budget:
-        console.print(f"[dim]Budget massimo: €{budget:.0f}[/dim]")
-    if genere:
-        console.print(f"[dim]Genere: {genere}[/dim]")
 
     with Status("[cyan]Navigazione in corso...[/cyan]", console=console):
-        prodotti_raw = await cerca_su_tutti_i_siti(query, budget, profilo, genere)
+        prodotti_raw = await cerca_su_tutti_i_siti(params, budget, profilo)
 
     if not prodotti_raw:
         console.print("[yellow]Nessun risultato. Prova con parole diverse o amplia il budget.[/yellow]")
@@ -156,6 +167,14 @@ def _prodotto_da_indice(argomenti: str):
         console.print(f"[red]Numero non valido. Scegli tra 1 e {len(_ultima_ricerca)}.[/red]")
         return None
     return _ultima_ricerca[n - 1].prodotto
+
+
+def _cmd_link(argomenti: str) -> None:
+    """Stampa l'URL del prodotto N (per copiarlo o aprirlo dal terminale)."""
+    prodotto = _prodotto_da_indice(argomenti)
+    if prodotto is None:
+        return
+    console.print(f"[bold]{prodotto.nome}[/bold]\n[link={prodotto.url}]{prodotto.url}[/link]")
 
 
 def _cmd_feedback(argomenti: str, positivo: bool) -> None:
@@ -450,6 +469,9 @@ async def avvia() -> None:
 
         # startswith + strip: così "/salva" senza numero mostra il messaggio d'uso
         # dell'handler invece di "comando non riconosciuto".
+        elif testo == "/link" or testo.startswith("/link "):
+            _cmd_link(testo[len("/link"):].strip())
+
         elif testo == "/salva" or testo.startswith("/salva "):
             _cmd_salva(testo[len("/salva"):].strip())
 

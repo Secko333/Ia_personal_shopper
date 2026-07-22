@@ -11,8 +11,14 @@ from Ia_personal_shopper import vinted_api
 from Ia_personal_shopper.browser import zalando, zara
 from Ia_personal_shopper.browser.agente_base import crea_agente_ricerca
 from Ia_personal_shopper.config import DELAY_MAX_AGENTE, DELAY_MIN_AGENTE, MAX_STEPS_RICERCA
-from Ia_personal_shopper.models import ProdottoRisultato, ProfiloUtente, RisultatiRicerca
+from Ia_personal_shopper.models import (
+    ParametriRicerca,
+    ProdottoRisultato,
+    ProfiloUtente,
+    RisultatiRicerca,
+)
 from Ia_personal_shopper.ricerca.aggregatore import filtra_e_ordina
+from Ia_personal_shopper.ricerca.interprete import color_ids, taglie_per_tipo
 
 console = Console()
 
@@ -30,28 +36,29 @@ _CATALOG_ID_GENERE = {"uomo": "5", "donna": "1904"}
 
 async def _esegui_ricerca_sito(
     sito: str,
-    query: str,
+    params: ParametriRicerca,
     budget: float | None,
     profilo: ProfiloUtente,
-    genere: str | None = None,
 ) -> list[ProdottoRisultato]:
     """Cerca su un singolo sito. Vinted via API JSON, gli altri via browser-use."""
     # Vinted: API JSON (veloce, gratis). curl_cffi è sincrono → gira in un thread.
     if sito == "vinted":
-        taglie = [t for t in (profilo.taglie.top, profilo.taglie.pantaloni, profilo.taglie.scarpe) if t]
         return await asyncio.to_thread(
             vinted_api.cerca_vinted,
-            query,
+            params.query,
             budget,
-            taglie=taglie or None,
-            catalog_ids=_CATALOG_ID_GENERE.get(genere),
+            taglie=taglie_per_tipo(params.tipo_capo, profilo),
+            catalog_ids=_CATALOG_ID_GENERE.get(params.genere),
+            color_ids=color_ids(params.colori),
         )
 
     # Delay casuale anti-bot per sfasare i lanci dei browser
     await asyncio.sleep(random.uniform(DELAY_MIN_AGENTE, DELAY_MAX_AGENTE))
 
+    # I siti browser non hanno il filtro colore API: il colore torna nel testo di ricerca.
+    query_browser = " ".join([params.query, *params.colori]).strip()
     builder = _TASK_BUILDERS[sito]
-    task_str = builder(query, budget, profilo, genere)
+    task_str = builder(query_browser, budget, profilo, params.genere)
 
     agente = crea_agente_ricerca(sito, task_str)
     history = await agente.run(max_steps=MAX_STEPS_RICERCA)
@@ -68,10 +75,9 @@ async def _esegui_ricerca_sito(
 
 
 async def cerca_su_tutti_i_siti(
-    query: str,
+    params: ParametriRicerca,
     budget: float | None,
     profilo: ProfiloUtente,
-    genere: str | None = None,
 ) -> list[ProdottoRisultato]:
     """
     Lancia ricerche in parallelo su tutti i siti attivi nel profilo.
@@ -80,7 +86,7 @@ async def cerca_su_tutti_i_siti(
     siti_attivi = [s for s in profilo.siti_attivi if s in _SITI_BROWSER or s in _SITI_API]
 
     tasks = [
-        _esegui_ricerca_sito(sito, query, budget, profilo, genere)
+        _esegui_ricerca_sito(sito, params, budget, profilo)
         for sito in siti_attivi
     ]
 
