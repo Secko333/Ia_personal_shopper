@@ -92,10 +92,10 @@ async def _cmd_ricerca(testo: str) -> None:
     if budget:
         dettagli.append(f"max €{budget:.0f}")
     console.print(f"[dim]🧠 {' · '.join(dettagli)}[/dim]")
-    if params.varianti_gusto:
+    if params.termine_stile:
         console.print(
-            f"[magenta]🎨 Cerco anche sul tuo gusto:[/magenta] "
-            + " · ".join(f"'[bold]{v}[/bold]'" for v in params.varianti_gusto)
+            f"[magenta]🎨 Una parte della ricerca aggiunge il tuo stile:[/magenta] "
+            f"'[bold]{params.termine_stile}[/bold]'"
         )
 
     # Le misure target rese esplicite prima di cercare: sono il criterio di selezione.

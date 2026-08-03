@@ -14,6 +14,7 @@ from Ia_personal_shopper.config import (
     DELAY_MAX_AGENTE,
     DELAY_MIN_AGENTE,
     MAX_CANDIDATI_FIT,
+    MAX_CANDIDATI_STILE,
     MAX_STEPS_RICERCA,
 )
 from Ia_personal_shopper.models import (
@@ -53,15 +54,19 @@ def _cerca_vinted(
     budget: float | None,
     profilo: ProfiloUtente,
 ) -> list[ProdottoRisultato]:
-    """Una ricerca per variante di gusto, più quella neutra, unite in un solo pool.
+    """Caccia primaria ai capi che dichiarano le misure, più una fetta minore col gusto.
 
-    Le varianti di gusto vanno per prime: su una query neutra Vinted restituisce il
-    mainstream (Hugo Boss, Disney, Guess), quindi nessun riordino a valle può produrre una
-    lista di gusto — bisogna pescare diverso. L'ordine determina anche la `rilevanza`, che
-    è lo spareggio quando le misure non discriminano, così i capi di gusto vincono i pari.
+    La vestibilità è il criterio chiave, quindi il grosso del budget va alla query pura
+    sulle misure: è quella che seleziona i venditori che le scrivono (65-75% dei risultati,
+    contro lo 0% di una query neutra). Il gusto entra in una fetta minoritaria con UN solo
+    termine, perché la ricerca Vinted è un'intersezione e ogni parola di gusto in più fa
+    crollare quella quota — misurato: "misure spalle lunghezza grunge" tiene il 65%,
+    "misure spalle lunghezza band tee" scende al 10%.
 
-    Il budget di candidati è ripartito tra le varianti: nessun costo in più, cambia solo da
-    dove arrivano. Sequenziali e non parallele: condividono la sessione curl_cffi.
+    Il gusto agisce poi nell'ordinamento (vedi valutazione/fit._chiave_ordine), dove rompe
+    i pari dentro la stessa fascia di vestibilità.
+
+    Sequenziali e non parallele: condividono la sessione curl_cffi module-level.
     """
     comune = dict(
         taglie=taglie_per_tipo(params.tipo_capo, profilo),
@@ -69,18 +74,16 @@ def _cerca_vinted(
         color_ids=color_ids(params.colori),
     )
     parole = _PAROLE_MISURE.get(params.tipo_capo, "misure")
-    # Solo varianti di gusto quando ci sono: la query neutra portava esclusivamente
-    # mainstream (Hugo Boss, Disney, Tommy, Liu Jo) e, avendo spesso misure complete e fit
-    # regolare, occupava le prime posizioni. Le varianti da sole danno ~58 candidati unici,
-    # quindi il pool non si assottiglia. Se l'interprete non ne genera — richiesta già
-    # specifica, es. "t-shirt dei Ramones" — la neutra riprende tutto il budget.
-    varianti = params.varianti_gusto or [params.query]
-    quota = max(MAX_CANDIDATI_FIT // len(varianti), 10)
+    base = f"{params.query} {parole}"
 
-    prodotti: list[ProdottoRisultato] = []
-    for variante in varianti:
+    # Senza un termine di stile utilizzabile tutto il budget va alla caccia alle misure.
+    quota_stile = MAX_CANDIDATI_STILE if params.termine_stile else 0
+    prodotti = vinted_api.cerca_vinted(
+        base, budget, per_page=MAX_CANDIDATI_FIT - quota_stile, **comune
+    )
+    if quota_stile:
         prodotti += vinted_api.cerca_vinted(
-            f"{variante} {parole}", budget, per_page=quota, **comune
+            f"{base} {params.termine_stile}", budget, per_page=quota_stile, **comune
         )
 
     # Rilevanza riassegnata sull'ordine unito: ogni chiamata la numera da 0.

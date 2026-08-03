@@ -33,9 +33,9 @@ _PROMPT = """Sei l'interprete delle ricerche di un personal shopper che cerca ca
 Trasforma la richiesta dell'utente in parametri di ricerca. Rispondi SOLO con JSON:
 {{"query": "...", "tipo_capo": "top|pantaloni|scarpe|altro", "colori": [...],
   "genere": "uomo"|"donna"|null, "vestibilita": "aderente|regular|oversize"|null,
-  "lunghezza": "corta|regular|lunga"|null, "varianti_gusto": ["...", "..."]}}
+  "lunghezza": "corta|regular|lunga"|null, "termine_stile": "..."|null}}
 
-GUSTI DELL'UTENTE (per varianti_gusto):
+GUSTI DELL'UTENTE (per termine_stile):
 stili: {stili}
 gli piacciono: {piacciono}
 da evitare: {evitare}
@@ -55,22 +55,22 @@ Regole:
 - lunghezza: quanto deve essere lungo. "corta" (croppata, crop, corta, sopra il fianco),
   "lunga" (lunga, longline, oltre il fianco). null se la richiesta NON lo dice.
   I due campi sono indipendenti: "oversize croppata" → vestibilita oversize, lunghezza corta.
-- varianti_gusto: 0-2 query alternative nello stesso formato di "query", che spingono la
-  ricerca verso i gusti dell'utente elencati sopra. Sono l'UNICA ricerca che verrà
-  eseguita, quindi devono essere buone: su una query neutra Vinted restituisce il
-  mainstream (Hugo Boss, Disney, Ralph Lauren) e non capi di suo gusto.
-  REGOLA VINCOLANTE: ogni variante deve contenere almeno un termine di stile
-  DISCRIMINANTE, cioè una sottocultura, una scena musicale o un dettaglio costruttivo
-  ("grunge", "band tee", "single stitch", "western", "goth", "punk", "workwear", "metal").
-  NON basta un'epoca: "vintage", "90s", "y2k" e "retro" da soli non discriminano niente,
-  su Vinted li scrive metà dei venditori. Una variante come "t-shirt vintage maniche corte"
-  è SBAGLIATA perché non porta nessuno stile: preferisci "t-shirt grunge single stitch".
-  Traduci gli stili dell'utente in termini che i venditori scrivono davvero nei titoli
-  (es. "Modern Western" → "western", "Alt-Rock" → "band tee rock").
-  Tieni le varianti corte: 3-5 parole, senza le parole già ovvie del tipo di capo.
+- termine_stile: UNA SOLA parola (massimo due) che spinge la ricerca verso i gusti
+  dell'utente elencati sopra. Verrà aggiunta a una fetta minoritaria della ricerca.
+  Deve essere UNA sola perché la ricerca Vinted è un'intersezione: ogni parola di gusto in
+  più fa crollare la quota di capi che dichiarano le misure, e le misure contano più del
+  gusto. Misurato: "misure spalle lunghezza grunge" tiene il 65% di capi con misure,
+  "misure spalle lunghezza band tee" scende al 10%.
+  Scegli un termine DISCRIMINANTE: una sottocultura, una scena o un dettaglio costruttivo
+  ("grunge", "western", "goth", "punk", "workwear", "metal", "single stitch").
+  NON un'epoca: "vintage", "90s", "y2k", "retro" non discriminano niente, su Vinted li
+  scrive metà dei venditori. NON un termine generico e onnipresente come "rock" o "band"
+  da solo: appaiono in troppe inserzioni di massa e diluiscono le misure.
+  Preferisci il termine più specifico tra gli stili dell'utente, tradotto in come lo
+  scrivono i venditori (es. "Modern Western" → "western", "Grunge" → "grunge").
   Non usare mai i termini elencati come "da evitare".
-  Restituisci [] se la richiesta è GIÀ specifica (nomina una band, un brand, un modello o
-  un dettaglio preciso): in quel caso le varianti aggiungerebbero solo rumore.
+  null se la richiesta è GIÀ specifica (nomina una band, un brand, un modello o un
+  dettaglio preciso), oppure se l'utente non ha stili registrati.
 
 Richiesta: {testo}"""
 
@@ -103,6 +103,27 @@ def _togli_vestibilita(query: str) -> str:
     return pulita or query
 
 
+# Qualsiasi accenno a come deve vestire il capo. Più larga di _SOLO_VESTIBILITA perché qui
+# serve solo a RILEVARE: include i termini ambigui che là non si possono cancellare.
+# Volutamente senza "corta"/"lunga": in "manica corta" parlano della manica, non del fit.
+_ACCENNO_VESTIBILITA = re.compile(
+    r"\b(?:aderent\w*|slim|attillat\w*|skinny|strett\w*|oversize[dn]?|larg[oahi]\w*|boxy"
+    r"|comod\w*|ampi[oae]|vestibilit\w*|fit)\b",
+    re.IGNORECASE,
+)
+
+
+def _vestibilita_richiesta(testo: str) -> bool:
+    """True se la richiesta dice qualcosa su come deve vestire il capo.
+
+    Il prompt chiede null quando la richiesta non lo dice, ma il modello risponde spesso
+    "regular" per riflesso. Senza questo controllo il default del profilo non scatta mai, e
+    per un utente che preferisce aderente il target sbaglia di 2cm sulle spalle e 3 sul
+    petto — cioè esattamente quello che questa funzione dovrebbe garantire.
+    """
+    return bool(_ACCENNO_VESTIBILITA.search(testo))
+
+
 def forme_colore(colore: str) -> list[str]:
     """Varianti di genere e numero di un colore italiano: "bianco" → bianca, bianchi, bianche."""
     c = colore.lower().strip()
@@ -131,18 +152,25 @@ def _togli_colori(query: str, colori: list[str]) -> str:
     return pulita or query
 
 
-def _variante_discriminante(variante: str, stili: set[str]) -> bool:
-    """True se la variante porta almeno un termine di stile vero.
+# Termini di gusto troppo comuni nei titoli: portano gusto ma azzerano le misure
+# (misurato: "misure spalle lunghezza rock" → 15% di capi con misure, contro il 65% di
+# "misure spalle lunghezza grunge"). Come termine unico non vanno usati.
+_GUSTO_TROPPO_COMUNE = {"rock", "band", "tee", "graphic", "streetwear", "denim"}
 
-    Senza questo controllo la qualità delle varianti oscilla tra esecuzioni: una volta
-    "t-shirt grunge single stitch", quella dopo "t-shirt vintage maniche corte" — che
-    riporta il mainstream, perché "vintage" su Vinted non seleziona niente. Le varianti
-    sono l'unica ricerca eseguita, quindi una variante debole costa l'intera lista.
+
+def _termine_stile_valido(termine: str, stili: set[str]) -> bool:
+    """True se il termine è di stile vero e abbastanza selettivo da non diluire le misure.
+
+    Senza questo controllo la scelta del modello oscilla tra esecuzioni identiche: una
+    volta "grunge", quella dopo "vintage" — che su Vinted non seleziona niente e riporta il
+    mainstream. Il termine finisce in una sola fetta della ricerca, ma quella fetta è
+    l'unico ingresso del gusto, quindi un termine debole la spreca.
     """
-    token = {
-        t for t in re.findall(r"[\w'-]+", variante.lower())
-        if t not in EPOCHE_GENERICHE
-    }
+    token = {t for t in re.findall(r"[\w'-]+", termine.lower())}
+    if len(token) > 2 or not token:
+        return False
+    if token & (EPOCHE_GENERICHE | _GUSTO_TROPPO_COMUNE):
+        return False
     return bool(token & (stili | _MARCATORI_STILE))
 
 
@@ -181,27 +209,17 @@ async def interpreta_ricerca(testo: str, profilo: ProfiloUtente) -> ParametriRic
     # Se la richiesta non dice come deve vestire, decide il profilo; solo in ultima istanza
     # "regular". Così "cerca una t-shirt nera" rispetta la vestibilità preferita dell'utente
     # invece di ignorarla.
-    if params.vestibilita not in _VESTIBILITA:
+    if params.vestibilita not in _VESTIBILITA or not _vestibilita_richiesta(testo):
         params.vestibilita = profilo.vestibilita_preferita
     if params.vestibilita not in _VESTIBILITA:
         params.vestibilita = "regular"
     if params.lunghezza not in _LUNGHEZZE:
         params.lunghezza = "regular"
-    # Varianti vuote, duplicate o senza un vero termine di stile non aggiungono candidati:
-    # le prime due solo attesa, la terza mainstream. Se cadono tutte, il coordinatore
-    # ricade sulla query neutra.
+    # Un termine di stile debole spreca la fetta di ricerca che gli è riservata: meglio
+    # nessuno, e il coordinatore usa tutto il budget per la caccia pura alle misure.
     stili_utente, _ = vocabolari_gusto(profilo)
-    viste = {params.query.strip().lower()}
-    varianti = []
-    for v in params.varianti_gusto:
-        v = (v or "").strip()
-        if not v or v.lower() in viste:
-            continue
-        if not _variante_discriminante(v, stili_utente):
-            continue
-        viste.add(v.lower())
-        varianti.append(v)
-    params.varianti_gusto = varianti[:2]
+    termine = (params.termine_stile or "").strip()
+    params.termine_stile = termine if _termine_stile_valido(termine, stili_utente) else None
     return params
 
 
@@ -228,14 +246,21 @@ if __name__ == "__main__":
     assert color_ids(["bianco", "blu marino"]) == "12,27"
     assert color_ids(["fucsia acceso"]) is None
 
-    # Il presidio sulle varianti: un'epoca da sola non è uno stile
+    # Il presidio sul termine di stile: deve essere di stile, corto e selettivo
     stili = {"grunge", "western", "rock", "indie"}
-    assert _variante_discriminante("t-shirt grunge single stitch", stili)
-    assert _variante_discriminante("camicia western denim", stili)
-    assert _variante_discriminante("t-shirt band tee", set())        # marcatore, non nel profilo
-    assert not _variante_discriminante("t-shirt vintage maniche corte", stili)
-    assert not _variante_discriminante("maglietta anni 90 y2k retro", stili)
-    assert not _variante_discriminante("t-shirt uomo cotone", stili)
+    assert _termine_stile_valido("grunge", stili)
+    assert _termine_stile_valido("western", stili)
+    assert _termine_stile_valido("single stitch", set())       # marcatore, non nel profilo
+    # Un'epoca non discrimina niente su Vinted
+    assert not _termine_stile_valido("vintage", stili)
+    assert not _termine_stile_valido("y2k", stili)
+    # Nel profilo ma troppo comune nei titoli: porta gusto e azzera le misure
+    assert not _termine_stile_valido("rock", stili)
+    assert not _termine_stile_valido("band tee", stili)
+    # Né uno stile, né una frase intera, né vuoto
+    assert not _termine_stile_valido("cotone", stili)
+    assert not _termine_stile_valido("t-shirt grunge single stitch", stili)
+    assert not _termine_stile_valido("", stili)
 
     # I termini di sola vestibilità escono dalla query; quelli che descrivono il capo restano
     assert _togli_vestibilita("maglietta manica corta croppata") == "maglietta manica corta"
@@ -257,6 +282,16 @@ if __name__ == "__main__":
     # Senza colori estratti la query non si tocca
     assert _togli_colori("maglietta bianca", []) == "maglietta bianca"
     assert _togli_colori("bianco", ["bianco"]) == "bianco"   # mai svuotare la query
+
+    # Rilevamento della vestibilità nella richiesta: decide se vale il default del profilo
+    assert _vestibilita_richiesta("voglio una t-shirt aderente")
+    assert _vestibilita_richiesta("felpa oversize")
+    assert _vestibilita_richiesta("jeans un po' larghi")
+    assert _vestibilita_richiesta("maglietta comoda")
+    # "manica corta" parla della manica, non di come veste: deve valere il profilo
+    assert not _vestibilita_richiesta("maglietta t-shirt a maniche corte")
+    assert not _vestibilita_richiesta("t-shirt nera con stampa")
+    assert not _vestibilita_richiesta("camicia a manica lunga")
 
     p = ProfiloUtente(taglie=TaglieUtente(top="L", pantaloni="32", scarpe="47"))
     assert taglie_per_tipo("top", p) == ["L"]

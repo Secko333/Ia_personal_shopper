@@ -492,6 +492,95 @@ nessun descrittore appreso. L'affinità è quindi un segnale sparso — quando s
 significativo, ma su molti capi vale 0 e decide la rilevanza Vinted. Si infittisce con
 l'uso di `/mipiace`.
 
+## Terza tornata: la vestibilità è la chiave, il gusto viene dopo (2026-08-03)
+
+La seconda tornata aveva reso il gusto il criterio del recupero. Sbagliato: misurato sul
+campo, mescolare gusto e misure nella stessa query **distrugge** la selettività sulle misure.
+
+| query | capi con misure dichiarate |
+|---|---|
+| `t-shirt uomo misure spalle lunghezza` | **65-75%** |
+| `t-shirt band tee rock misure spalle lunghezza` | 5% |
+| `t-shirt grunge single stitch misure spalle lunghezza` | 0% |
+| `t-shirt band tee rock grunge` | 5% |
+
+La ricerca Vinted è un'intersezione su titolo e descrizione: pochi venditori scrivono sia
+il vocabolario di sottocultura sia le misure, e il risultato è dominato dal termine più
+raro. La seconda tornata aveva quindi barattato le misure per il gusto senza accorgersene —
+è per questo che le liste mostravano quasi solo "misure non dichiarate".
+
+### Un solo termine di stile, e non uno qualsiasi
+
+Esiste una via di mezzo, ma è strettissima e dipende da quale termine:
+
+| query | misure | gusto |
+|---|---|---|
+| `t-shirt uomo misure spalle lunghezza` | 65% | 0% |
+| `t-shirt misure spalle lunghezza grunge` | **65%** | **40%** |
+| `t-shirt misure spalle lunghezza vintage` | 35% | 5% |
+| `t-shirt misure spalle lunghezza rock` | 15% | 80% |
+| `t-shirt misure lunghezza band tee` | 10% | 55% |
+
+"grunge" tiene entrambi perché lo scrivono i venditori vintage curati, che sono anche quelli
+che riportano le misure; "rock" e "band tee" compaiono nelle inserzioni di massa e
+spostano l'intersezione sui capi che non le dichiarano. Campione di 20 per query: indicativo.
+
+Di conseguenza `ParametriRicerca.varianti_gusto` (liste di query) è stato sostituito da
+`termine_stile: str | None`: **una** parola, massimo due.
+
+### Recupero
+
+`coordinatore._cerca_vinted` fa due ricerche, con `MAX_CANDIDATI_STILE = 20` su
+`MAX_CANDIDATI_FIT = 60`:
+
+```
+40  "{query} misure spalle lunghezza"            ← caccia pura alle misure
+20  "{query} misure spalle lunghezza {stile}"    ← misure con una tinta di gusto
+```
+
+Senza un termine di stile utilizzabile, tutti i 60 vanno alla caccia pura. Il gusto agisce
+poi nell'ordinamento, dove `_chiave_ordine` è già `(fascia di fit, −affinità, −confidenza,
+rilevanza)`: la vestibilità decide, il gusto rompe i pari.
+
+I capi senza misure dichiarate restano in lista sotto il separatore "in forse", come da
+requisito originale: chi non dichiara le misure si può sempre contattare.
+
+### Altri due presidi deterministici
+
+`_termine_stile_valido` rifiuta un termine che sia un'epoca (`EPOCHE_GENERICHE`), troppo
+comune nei titoli (`_GUSTO_TROPPO_COMUNE`: rock, band, tee, graphic, streetwear, denim),
+più lungo di due parole, o non riconducibile a nessuno stile. Senza, la scelta del modello
+oscilla tra esecuzioni identiche e spreca la fetta che le è riservata.
+
+`_vestibilita_richiesta` è il presidio più importante per la correttezza del fit. Il prompt
+chiede `null` quando la richiesta non dice come deve vestire il capo, ma il modello
+risponde "regular" per riflesso — e così il default del profilo non scattava mai. Per un
+utente che preferisce aderente il target sbagliava di 2cm sulle spalle e 3 sul petto,
+esattamente ciò che la feature dovrebbe garantire. Ora si rileva sul testo della richiesta
+se la vestibilità è stata espressa; se no, vince il profilo.
+
+Il rilevamento è volutamente più larga di `_SOLO_VESTIBILITA` (include i termini ambigui
+"larga", "comoda", "stretta") ma esclude "corta" e "lunga": in "manica corta" parlano
+della manica, non di come veste.
+
+### Esito
+
+`"maglietta t-shirt a maniche corte"`, profilo con `vestibilita_preferita: aderente`:
+
+```
+🎨 Una parte della ricerca aggiunge il tuo stile: 'grunge'
+🎯 Misure cercate (top): spalle ~50cm · petto ~48cm · lungh ~72cm
+60 candidati · ✂ 21 scartati fuori misura · 📷 2 misure lette dalle foto
+```
+
+Tutti i capi mostrati dichiarano le misure, contro i 3 su 12 della tornata precedente.
+
+### Nota sul dato di profilo
+
+`vestibilita_preferita` è un valore di dati, non di codice: se vale `regular` il target usa
+gli scarti regular anche quando l'utente preferirebbe aderente. Si controlla con `/profilo`
+e si corregge con `/profilo modifica`.
+
 ## Fuori scopo
 
 - Zara e Zalando: non espongono le misure del singolo capo, restano sul filtro taglia.

@@ -40,9 +40,10 @@ class ParametriRicerca(BaseModel):
     # dopo il quale sono sempre valorizzati.
     vestibilita: str | None = None                     # "aderente" | "regular" | "oversize" → larghezze
     lunghezza: str | None = None                       # "corta" | "regular" | "lunga" → lunghezza
-    # Query alternative che spingono verso i gusti dell'utente. Senza, Vinted restituisce il
-    # mainstream: misurato lo 0% di capi di gusto su una query neutra (vedi coordinatore).
-    varianti_gusto: list[str] = Field(default_factory=list)
+    # UN solo termine di stile da aggiungere alla fetta secondaria della ricerca. Uno, non
+    # una query intera: la ricerca Vinted è un'intersezione, e ogni parola di gusto in più
+    # fa crollare la quota di capi che dichiarano le misure (misurato: 65% → 5%).
+    termine_stile: str | None = None
 
 
 # ---------------------------------------------------------------------------

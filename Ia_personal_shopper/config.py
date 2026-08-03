@@ -39,6 +39,11 @@ MAX_RISULTATI_TOTALI = 20
 MAX_CANDIDATI_FIT = 60
 MAX_RISULTATI_FINALI = 12
 
+# Di quei candidati, quanti cercati aggiungendo un termine di stile. Il resto va alla
+# ricerca pura sulle misure. La vestibilità è il criterio primario, quindi la fetta di
+# stile resta minoritaria: aggiungere gusto alla query costa selettività sulle misure.
+MAX_CANDIDATI_STILE = 20
+
 # Fallback vision: quanti capi senza misure nella descrizione mandare a leggere dalle foto.
 MAX_CAPI_VISION = 6
 
