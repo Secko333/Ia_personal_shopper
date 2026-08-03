@@ -7,7 +7,16 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from Ia_personal_shopper.models import ArticoloPreferito, ProdottoArricchito, ProfiloUtente
+from Ia_personal_shopper.models import (
+    ArticoloPreferito,
+    CapoGuardaroba,
+    MisureTarget,
+    ProdottoArricchito,
+    ProfiloUtente,
+    Proposta,
+    ReportFit,
+)
+from Ia_personal_shopper.valutazione.fit import descrivi_target, etichetta_fit
 
 console = Console()
 
@@ -47,6 +56,34 @@ def stampa_banner() -> None:
     console.print("[dim]Digita una ricerca, /aiuto per i comandi, /esci per uscire.[/dim]\n")
 
 
+def stampa_target_fit(target: MisureTarget, tipo_capo: str) -> None:
+    """Le misure cercate, rese esplicite prima della ricerca."""
+    descrizione = descrivi_target(target)
+    if descrizione:
+        console.print(f"[cyan]🎯 Misure cercate ({tipo_capo}):[/cyan] [bold]{descrizione}[/bold]")
+
+
+def stampa_report_fit(report: ReportFit) -> None:
+    """Contabilità della selezione: quanti candidati, quanti scartati e perché."""
+    if not report.attivo:
+        return
+    righe = [f"{report.candidati} candidati"]
+    if report.scartati:
+        dettaglio = f" (il più vicino: {report.miglior_scartato})" if report.miglior_scartato else ""
+        righe.append(f"[yellow]✂ {report.scartati} scartati fuori misura{dettaglio}[/yellow]")
+    if report.letti_da_foto:
+        righe.append(f"📷 {report.letti_da_foto} misure lette dalle foto")
+    if report.errori_foto:
+        righe.append(f"[yellow]⚠ {report.errori_foto} letture da foto non riuscite[/yellow]")
+    console.print("[dim]" + " · ".join(righe) + "[/dim]")
+    if report.errore_descrizioni:
+        console.print(
+            "[red]⚠ La lettura delle misure dalle descrizioni è fallita[/red] — i capi qui "
+            "sotto risultano senza misure per un problema tecnico, non perché il venditore "
+            "non le abbia scritte. Controlla ANTHROPIC_API_KEY e la connessione."
+        )
+
+
 def stampa_risultati(prodotti: list[ProdottoArricchito], query: str) -> None:
     if not prodotti:
         console.print("[yellow]Nessun risultato trovato. Prova con una ricerca diversa.[/yellow]")
@@ -67,9 +104,24 @@ def stampa_risultati(prodotti: list[ProdottoArricchito], query: str) -> None:
     table.add_column("Taglia", width=7, justify="center")
     table.add_column("Parere", min_width=30)
 
+    # I capi con misure dichiarate vengono prima; quelli "in forse" dopo un separatore.
+    primo_in_forse = next(
+        (i for i, pa in enumerate(prodotti) if pa.fit is not None and pa.fit.confidenza == 0),
+        None,
+    )
+    ha_misurati = primo_in_forse is not None and primo_in_forse > 0
+
     for i, pa in enumerate(prodotti, start=1):
         p = pa.prodotto
         v = pa.valutazione
+
+        if ha_misurati and i - 1 == primo_in_forse:
+            table.add_section()
+            table.add_row(
+                "", "",
+                Text.from_markup("[dim italic]— in forse: misure non dichiarate —[/dim italic]"),
+                "", "", "",
+            )
 
         # Colonna sito
         icona = ICONE_SITO.get(p.sito, "🔵")
@@ -91,17 +143,24 @@ def stampa_risultati(prodotti: list[ProdottoArricchito], query: str) -> None:
         # Colonna taglia
         taglia_str = p.taglia_disponibile or "[dim]-[/dim]"
 
-        # Colonna parere
+        # Colonna parere: giudizio del consulente + riga misure calcolata da fit.py
+        righe_parere = []
         if v:
             colore = COLORI_RACCOMANDAZIONE.get(v.raccomandazione, "white")
             icona_racc = ICONE_RACCOMANDAZIONE.get(v.raccomandazione, "•")
-            riga_fit = f"\n[cyan]📏 {v.vestibilita}[/cyan]" if v.vestibilita else ""
-            parere = Text.from_markup(
-                f"[{colore}]{icona_racc} {v.raccomandazione.upper()}[/{colore}]\n"
-                f"[italic]{v.commento}[/italic]{riga_fit}"
-            )
-        else:
-            parere = Text("[dim]—[/dim]")
+            righe_parere.append(f"[{colore}]{icona_racc} {v.raccomandazione.upper()}[/{colore}]")
+            righe_parere.append(f"[italic]{v.commento}[/italic]")
+
+        if pa.fit is not None:
+            testo_fit, stile_fit = etichetta_fit(pa.fit)
+            if pa.fit.confidenza == 0:
+                righe_parere.append(f"[{stile_fit}]{testo_fit}[/{stile_fit}]")
+            else:
+                righe_parere.append(
+                    f"[{stile_fit}]{testo_fit}[/{stile_fit}]  [cyan]{pa.fit.dettaglio}[/cyan]"
+                )
+
+        parere = Text.from_markup("\n".join(righe_parere) if righe_parere else "[dim]—[/dim]")
 
         table.add_row(
             str(i),
@@ -213,11 +272,57 @@ def stampa_preferiti(preferiti: list[ArticoloPreferito]) -> None:
     console.print(table)
 
 
+def stampa_guardaroba(capi: list[CapoGuardaroba]) -> None:
+    if not capi:
+        console.print(
+            "[dim]Guardaroba vuoto. Aggiungi capi con "
+            "[bold]/guardaroba aggiungi <desc>[/bold] o [bold]/guardaroba foto <path>[/bold].[/dim]"
+        )
+        return
+
+    table = Table(
+        title="👔 Il tuo guardaroba",
+        show_header=True,
+        header_style="bold cyan",
+        show_lines=True,
+        expand=True,
+    )
+    table.add_column("#", style="dim", width=3, justify="right")
+    table.add_column("Data", width=11)
+    table.add_column("Capo", min_width=30)
+
+    for i, c in enumerate(capi, start=1):
+        data = c.aggiunto_il[:10] if c.aggiunto_il else "—"
+        table.add_row(str(i), data, c.descrizione)
+
+    console.print(table)
+    console.print("[dim]Rimuovi un capo con [bold]/guardaroba rimuovi N[/bold].[/dim]")
+
+
+def stampa_proposte(proposte: list[Proposta]) -> None:
+    console.print("\n[bold cyan]💡 Ho pensato a queste proposte per te:[/bold cyan]\n")
+    for i, p in enumerate(proposte, start=1):
+        tipo = "outfit" if len(p.ricerche) > 1 else "capo"
+        console.print(f"[bold]{i}. {p.titolo}[/bold] [dim]({tipo})[/dim]")
+        console.print(f"   [italic]{p.motivo}[/italic]")
+        for q in p.ricerche:
+            console.print(f"   [dim]→ {q}[/dim]")
+        console.print()
+
+
 def stampa_aiuto() -> None:
     contenuto = (
         "[bold]Ricerca:[/bold]\n"
         "  Scrivi liberamente es: [cyan]Cerca una giacca di pelle marrone, max 80€[/cyan]\n"
-        "  Con foto: [cyan]/foto /percorso/immagine.jpg budget 60€[/cyan]\n\n"
+        "  Da foto d'ispirazione (capo o outfit): [cyan]/foto /percorso/immagine.jpg budget 60€[/cyan]\n"
+        "  [dim]Un outfit viene scomposto nei singoli capi, uno per ricerca.[/dim]\n\n"
+        "[bold]Proposte proattive:[/bold]\n"
+        "  [cyan]/proponi[/cyan]          → L'IA propone capi e outfit su misura, poi li cerca\n\n"
+        "[bold]Guardaroba:[/bold]\n"
+        "  [cyan]/guardaroba[/cyan]                  → Mostra i capi che possiedi\n"
+        "  [cyan]/guardaroba aggiungi <desc>[/cyan] → Aggiungi un capo a parole\n"
+        "  [cyan]/guardaroba foto <path>[/cyan]     → Aggiungi un capo da foto\n"
+        "  [cyan]/guardaroba rimuovi N[/cyan]       → Rimuovi il capo N\n\n"
         "[bold]Stile e gusti:[/bold]\n"
         "  [cyan]/stile foto <path>[/cyan] → Deduci lo stile da una foto di ispirazione\n"
         "  [cyan]/stile intervista[/cyan]  → Questionario per costruire i tuoi gusti\n"

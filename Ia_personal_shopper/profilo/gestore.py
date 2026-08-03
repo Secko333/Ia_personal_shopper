@@ -8,10 +8,12 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from Ia_personal_shopper.config import PREFERITI_PATH, PROFILO_PATH
+from Ia_personal_shopper.config import GUARDAROBA_PATH, PREFERITI_PATH, PROFILO_PATH
 from Ia_personal_shopper.models import (
     ArticoloPreferito,
+    CapoGuardaroba,
     FisicoUtente,
+    ListaGuardaroba,
     ListaPreferiti,
     ProdottoRisultato,
     ProfiloUtente,
@@ -129,5 +131,45 @@ def rimuovi_preferito(id_articolo: str) -> bool:
     lista.preferiti = [p for p in lista.preferiti if p.id != id_articolo]
     if len(lista.preferiti) < originale:
         salva_preferiti(lista)
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Guardaroba (capi posseduti)
+# ---------------------------------------------------------------------------
+
+def carica_guardaroba() -> ListaGuardaroba:
+    if not GUARDAROBA_PATH.exists():
+        return ListaGuardaroba()
+    try:
+        data = json.loads(GUARDAROBA_PATH.read_text(encoding="utf-8"))
+        return ListaGuardaroba.model_validate(data)
+    except Exception:
+        return ListaGuardaroba()
+
+
+def salva_guardaroba(lista: ListaGuardaroba) -> None:
+    _scrivi_atomico(GUARDAROBA_PATH, lista.model_dump())
+
+
+def aggiungi_capo(descrizione: str) -> str:
+    lista = carica_guardaroba()
+    capo = CapoGuardaroba(
+        id=str(uuid.uuid4()),
+        aggiunto_il=_ora_iso(),
+        descrizione=descrizione.strip(),
+    )
+    lista.capi.append(capo)
+    salva_guardaroba(lista)
+    return capo.id
+
+
+def rimuovi_capo(id_capo: str) -> bool:
+    lista = carica_guardaroba()
+    originale = len(lista.capi)
+    lista.capi = [c for c in lista.capi if c.id != id_capo]
+    if len(lista.capi) < originale:
+        salva_guardaroba(lista)
         return True
     return False

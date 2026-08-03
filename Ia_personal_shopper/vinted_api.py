@@ -93,6 +93,9 @@ def _mappa_item(item: dict) -> ProdottoRisultato:
     # Prezzo base ("price") prima del totale con protezione acquisti: è quello su cui
     # filtra price_to, così il prezzo mostrato è coerente col budget.
     prezzo = _prezzo(item.get("price")) or _prezzo(item.get("total_item_price"))
+    # "photos" arriva già nella risposta della lista (5-15 URL full-size, zero GET extra):
+    # è la fonte del fallback vision quando le misure non sono nella descrizione.
+    foto = [f["url"] for f in (item.get("photos") or []) if f.get("url")]
     return ProdottoRisultato(
         nome=item.get("title") or "(senza titolo)",
         brand=item.get("brand_title"),
@@ -103,7 +106,25 @@ def _mappa_item(item: dict) -> ProdottoRisultato:
         immagine_url=photo.get("url"),
         condizione=item.get("status"),
         descrizione=item.get("description"),  # None dalla lista → arricchito da _descrizione_da_pagina
+        foto=foto,
     )
+
+
+def scarica_immagine(url: str) -> tuple[bytes | None, str]:
+    """(contenuto, media_type) di una foto Vinted, o (None, "") se non scaricabile.
+
+    Passa dalla sessione già scaldata: le immagini stanno dietro allo stesso DataDome
+    del resto del sito, quindi un fetch esterno (incluso quello dell'API Anthropic da
+    URL) verrebbe bloccato.
+    """
+    try:
+        r = _get_session().get(url, timeout=20)
+        if r.status_code == 200 and r.content:
+            tipo = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+            return r.content, tipo
+    except Exception:
+        pass
+    return None, ""
 
 
 def _descrizione_da_pagina(session, url: str) -> str | None:
@@ -125,6 +146,24 @@ def _descrizione_da_pagina(session, url: str) -> str | None:
 
 # Token alfabetici che contano come taglia (le altre parole del profilo, es. "di vita", si ignorano).
 _TAGLIE_ALPHA = {"xs", "s", "m", "l", "xl", "xxl", "xxxl"}
+
+# Tetto di per_page accettato dall'API (verificato: 192 torna 96). I filtri post-fetch
+# (taglia, condizione) dimezzano il raccolto, quindi si pagina finché non si raggiunge il
+# numero di candidati richiesto — senza, una richiesta di 60 ne consegnava 28 in silenzio.
+_PER_PAGE_MAX = 96
+_MAX_PAGINE = 3
+
+
+def _items_pagina(session, params: dict, pagina: int) -> list[dict]:
+    """Una pagina di risultati. Su 403 ri-scalda la sessione e ritenta una volta."""
+    global _session
+    p = {**params, "page": pagina}
+    r = session.get(ENDPOINT_ITEMS, params=p, timeout=20)
+    if r.status_code == 403:
+        session = _get_session(force=True)  # cookie scaduto → ri-warm e ritenta
+        r = session.get(ENDPOINT_ITEMS, params=p, timeout=20)
+    r.raise_for_status()
+    return (r.json() or {}).get("items", [])
 
 
 def _taglia_compatibile(size_title: str | None, taglie: list[str]) -> bool:
@@ -161,11 +200,11 @@ def cerca_vinted(
     catalog_ids: ID categoria Vinted (es. uomo) passato all'API, opzionale.
     color_ids: ID colore Vinted in CSV (vedi ricerca/interprete.py), opzionale.
     """
-    # I filtri post-fetch riducono i risultati → si chiede una pagina più larga e si tronca dopo.
+    # I filtri post-fetch riducono i risultati → si chiede il massimo e si pagina.
     filtri_attivi = bool(taglie or escludi_condizione_scarsa)
     params = {
         "search_text": query,
-        "per_page": max(per_page * 3, 24) if filtri_attivi else per_page,
+        "per_page": min(per_page, _PER_PAGE_MAX) if not filtri_attivi else _PER_PAGE_MAX,
         "order": order,
         "currency": "EUR",
     }
@@ -177,19 +216,30 @@ def cerca_vinted(
         params["color_ids"] = color_ids
 
     session = _get_session()
-    r = session.get(ENDPOINT_ITEMS, params=params, timeout=20)
-    if r.status_code == 403:
-        session = _get_session(force=True)  # cookie scaduto → ri-warm e ritenta
-        r = session.get(ENDPOINT_ITEMS, params=params, timeout=20)
-    r.raise_for_status()
+    prodotti: list[ProdottoRisultato] = []
+    visti: set[str] = set()
 
-    items = (r.json() or {}).get("items", [])
-    prodotti = [_mappa_item(it) for it in items]
+    for pagina in range(1, (_MAX_PAGINE if filtri_attivi else 1) + 1):
+        items = _items_pagina(session, params, pagina)
+        if not items:
+            break
+        for it in items:
+            chiave = str(it.get("id") or it.get("url"))
+            if chiave in visti:          # le pagine Vinted si sovrappongono un po'
+                continue
+            visti.add(chiave)
+            p = _mappa_item(it)
+            if taglie and not _taglia_compatibile(p.taglia_disponibile, taglie):
+                continue
+            if escludi_condizione_scarsa and (p.condizione or "").lower() == "soddisfacente":
+                continue
+            # Posizione nell'ordine di rilevanza Vinted, prima di qualsiasi riordino nostro:
+            # è il miglior spareggio disponibile quando il fit non discrimina (vedi fit.py).
+            p.rilevanza = len(prodotti)
+            prodotti.append(p)
+        if len(prodotti) >= per_page:
+            break
 
-    if taglie:
-        prodotti = [p for p in prodotti if _taglia_compatibile(p.taglia_disponibile, taglie)]
-    if escludi_condizione_scarsa:
-        prodotti = [p for p in prodotti if (p.condizione or "").lower() != "soddisfacente"]
     prodotti = prodotti[:per_page]  # tronca PRIMA dell'arricchimento: max per_page GET
 
     # ponytail: descrizione (per il fit) presa dal meta della pagina pubblica, una GET per prodotto.

@@ -14,26 +14,39 @@ from Ia_personal_shopper.cli.display import (
     console,
     stampa_aiuto,
     stampa_banner,
+    stampa_guardaroba,
     stampa_preferiti,
     stampa_profilo,
+    stampa_proposte,
+    stampa_report_fit,
     stampa_risultati,
     stampa_siti,
+    stampa_target_fit,
 )
 from Ia_personal_shopper.config import SITI_SUPPORTATI
 from Ia_personal_shopper.models import ProdottoArricchito
 from Ia_personal_shopper.profilo.gestore import (
+    aggiungi_capo,
     aggiungi_gusti,
     aggiungi_preferito,
     aggiungi_stile,
+    carica_guardaroba,
     carica_preferiti,
     carica_profilo,
+    rimuovi_capo,
     salva_profilo,
 )
 from Ia_personal_shopper.ricerca.aggregatore import estrai_budget
 from Ia_personal_shopper.ricerca.coordinatore import cerca_su_tutti_i_siti
 from Ia_personal_shopper.ricerca.interprete import interpreta_ricerca, taglie_per_tipo
+from Ia_personal_shopper.ricerca.proposte import genera_proposte
 from Ia_personal_shopper.valutazione.consulente import valuta_prodotti
-from Ia_personal_shopper.vision.analizzatore import descrivi_immagine, estrai_stile_da_immagine
+from Ia_personal_shopper.valutazione.fit import misure_target, seleziona
+from Ia_personal_shopper.vision.analizzatore import (
+    descrivi_immagine,
+    estrai_capi_da_outfit,
+    estrai_stile_da_immagine,
+)
 
 # ---------------------------------------------------------------------------
 # Stato sessione
@@ -68,11 +81,19 @@ async def _cmd_ricerca(testo: str) -> None:
     taglie = taglie_per_tipo(params.tipo_capo, profilo)
     if taglie:
         dettagli.append(f"taglia {params.tipo_capo}: {taglie[0]}")
+    if params.vestibilita != "regular":
+        dettagli.append(params.vestibilita)
+    if params.lunghezza != "regular":
+        dettagli.append(f"lunghezza {params.lunghezza}")
     if params.genere:
         dettagli.append(params.genere)
     if budget:
         dettagli.append(f"max €{budget:.0f}")
     console.print(f"[dim]🧠 {' · '.join(dettagli)}[/dim]")
+
+    # Le misure target rese esplicite prima di cercare: sono il criterio di selezione.
+    target = misure_target(profilo, params.tipo_capo, params.vestibilita, params.lunghezza)
+    stampa_target_fit(target, params.tipo_capo)
 
     siti_str = ", ".join(profilo.siti_attivi)
     console.print(f"\n[cyan]🔍 Cerco su {siti_str}...[/cyan]")
@@ -84,8 +105,23 @@ async def _cmd_ricerca(testo: str) -> None:
         console.print("[yellow]Nessun risultato. Prova con parole diverse o amplia il budget.[/yellow]")
         return
 
-    console.print(f"[dim]💭 Elaboro le valutazioni per {len(prodotti_raw)} prodotti...[/dim]")
-    prodotti_arricchiti = await valuta_prodotti(prodotti_raw, profilo, budget)
+    with Status("[cyan]Leggo le misure dei capi...[/cyan]", console=console):
+        prodotti_arricchiti, report = await seleziona(prodotti_raw, profilo, params)
+
+    stampa_report_fit(report)
+
+    if not prodotti_arricchiti:
+        console.print(
+            "[yellow]Tutti i candidati sono fuori misura.[/yellow] Prova ad allargare la "
+            "richiesta, oppure alza [bold]SCARTO_MAX_CM[/bold] in valutazione/fit.py."
+        )
+        return
+
+    console.print(f"[dim]💭 Elaboro le valutazioni per {len(prodotti_arricchiti)} prodotti...[/dim]")
+    guardaroba = carica_guardaroba().capi
+    prodotti_arricchiti = await valuta_prodotti(
+        prodotti_arricchiti, profilo, budget, guardaroba, target
+    )
 
     _ultima_ricerca = prodotti_arricchiti
     _ultima_query = testo
@@ -94,9 +130,10 @@ async def _cmd_ricerca(testo: str) -> None:
 
 
 async def _cmd_foto(argomenti: str) -> None:
-    """Flow: /foto /percorso/immagine.jpg [budget N€]"""
-    global _ultima_ricerca, _ultima_query
+    """Flow: /foto /percorso/immagine.jpg [budget N€] — la foto d'ispirazione guida una o più ricerche.
 
+    Un outfit viene scomposto nei singoli capi: una ricerca personalizzata per ciascuno.
+    """
     # Estrai path e budget opzionale
     match_budget = re.search(r"budget\s+(\d+(?:[.,]\d+)?)\s*€?", argomenti, re.IGNORECASE)
     budget_str = match_budget.group(0) if match_budget else ""
@@ -110,7 +147,7 @@ async def _cmd_foto(argomenti: str) -> None:
 
     try:
         with Status("[cyan]Analisi immagine in corso...[/cyan]", console=console):
-            descrizione = await descrivi_immagine(path_immagine)
+            capi = await estrai_capi_da_outfit(path_immagine)
     except FileNotFoundError as e:
         console.print(f"[red]File non trovato: {e}[/red]")
         return
@@ -118,14 +155,18 @@ async def _cmd_foto(argomenti: str) -> None:
         console.print(f"[red]{e}[/red]")
         return
 
-    console.print(f"[green]📝 Descrizione rilevata:[/green] [italic]{descrizione}[/italic]\n")
+    if not capi:
+        console.print("[yellow]Non ho riconosciuto capi nell'immagine.[/yellow]")
+        return
 
-    # Aggiungi il budget alla query se presente
-    query = descrizione
-    if match_budget:
-        query = f"{descrizione}, {budget_str}"
+    console.print(f"[green]📝 Capi individuati:[/green] [italic]{' · '.join(capi)}[/italic]\n")
 
-    await _cmd_ricerca(query)
+    # ponytail: outfit = ricerche sequenziali; _ultima_ricerca tiene l'ultimo capo (come /proponi).
+    for i, capo in enumerate(capi, start=1):
+        if len(capi) > 1:
+            console.print(f"\n[bold magenta]— Capo {i}/{len(capi)}: {capo} —[/bold magenta]")
+        query = f"{capo}, {budget_str}" if match_budget else capo
+        await _cmd_ricerca(query)
 
 
 def _cmd_salva(argomenti: str) -> None:
@@ -189,6 +230,98 @@ def _cmd_feedback(argomenti: str, positivo: bool) -> None:
     else:
         aggiungi_gusti(negativi=[segnale])
         console.print(f"[yellow]👎 Registrato: eviterò [bold]{segnale}[/bold] in futuro.[/yellow]")
+
+
+async def _cmd_guardaroba(argomenti: str) -> None:
+    """/guardaroba  |  /guardaroba aggiungi <desc>  |  /guardaroba foto <path>  |  /guardaroba rimuovi N"""
+    argomenti = argomenti.strip()
+
+    if not argomenti:
+        stampa_guardaroba(carica_guardaroba().capi)
+        return
+
+    if argomenti.startswith("aggiungi "):
+        descrizione = argomenti[len("aggiungi "):].strip()
+        if not descrizione:
+            console.print("[red]Uso: /guardaroba aggiungi <descrizione del capo>[/red]")
+            return
+        aggiungi_capo(descrizione)
+        console.print(f"[green]✅ Aggiunto al guardaroba:[/green] {descrizione}")
+
+    elif argomenti.startswith("foto "):
+        path = argomenti[len("foto "):].strip()
+        if not path:
+            console.print("[red]Uso: /guardaroba foto /percorso/immagine.jpg[/red]")
+            return
+        try:
+            with Status("[cyan]Analizzo il capo dalla foto...[/cyan]", console=console):
+                descrizione = await descrivi_immagine(path)
+        except FileNotFoundError as e:
+            console.print(f"[red]File non trovato: {e}[/red]")
+            return
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            return
+        aggiungi_capo(descrizione)
+        console.print(f"[green]✅ Aggiunto al guardaroba:[/green] [italic]{descrizione}[/italic]")
+
+    elif argomenti.startswith("rimuovi "):
+        capi = carica_guardaroba().capi
+        try:
+            n = int(argomenti[len("rimuovi "):].strip())
+        except ValueError:
+            console.print("[red]Specifica il numero del capo: /guardaroba rimuovi 3[/red]")
+            return
+        if n < 1 or n > len(capi):
+            console.print(f"[red]Numero non valido. Scegli tra 1 e {len(capi)}.[/red]")
+            return
+        capo = capi[n - 1]
+        rimuovi_capo(capo.id)
+        console.print(f"[yellow]🗑  Rimosso dal guardaroba:[/yellow] {capo.descrizione}")
+
+    else:
+        console.print(
+            "[red]Uso:[/red] [bold]/guardaroba[/bold] · "
+            "[bold]/guardaroba aggiungi <desc>[/bold] · "
+            "[bold]/guardaroba foto <path>[/bold] · "
+            "[bold]/guardaroba rimuovi N[/bold]"
+        )
+
+
+async def _cmd_proponi() -> None:
+    """Proposte proattive basate su profilo + guardaroba, poi ricerca del capo/outfit scelto."""
+    profilo = carica_profilo()
+    guardaroba = carica_guardaroba().capi
+
+    with Status("[cyan]Penso a cosa potrebbe piacerti...[/cyan]", console=console):
+        proposte = await genera_proposte(profilo, guardaroba)
+
+    if not proposte:
+        console.print("[yellow]Non sono riuscito a generare proposte. Riprova.[/yellow]")
+        return
+
+    stampa_proposte(proposte)
+
+    scelta = Prompt.ask("Quale vuoi che cerchi? (numero, Invio per nessuna)", default="")
+    scelta = scelta.strip()
+    if not scelta:
+        return
+    try:
+        n = int(scelta)
+    except ValueError:
+        console.print("[red]Inserisci un numero valido.[/red]")
+        return
+    if n < 1 or n > len(proposte):
+        console.print(f"[red]Numero non valido. Scegli tra 1 e {len(proposte)}.[/red]")
+        return
+
+    proposta = proposte[n - 1]
+    # ponytail: outfit = ricerche sequenziali; _ultima_ricerca tiene l'ultimo pezzo,
+    # quindi /salva opera su quello. Accumulare se servirà salvare un intero outfit.
+    for i, query in enumerate(proposta.ricerche, start=1):
+        if len(proposta.ricerche) > 1:
+            console.print(f"\n[bold magenta]— Pezzo {i}/{len(proposta.ricerche)}: {query} —[/bold magenta]")
+        await _cmd_ricerca(query)
 
 
 async def _cmd_stile(argomenti: str) -> None:
@@ -466,6 +599,12 @@ async def avvia() -> None:
         elif testo == "/preferiti":
             lista = carica_preferiti()
             stampa_preferiti(lista.preferiti)
+
+        elif testo == "/proponi":
+            await _cmd_proponi()
+
+        elif testo == "/guardaroba" or testo.startswith("/guardaroba "):
+            await _cmd_guardaroba(testo[len("/guardaroba"):].strip())
 
         # startswith + strip: così "/salva" senza numero mostra il messaggio d'uso
         # dell'handler invece di "comando non riconosciuto".

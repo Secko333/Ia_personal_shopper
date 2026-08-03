@@ -8,8 +8,9 @@ import anthropic
 
 from Ia_personal_shopper.config import MODELLO_VALUTAZIONE
 from Ia_personal_shopper.models import (
+    CapoGuardaroba,
+    MisureTarget,
     ProdottoArricchito,
-    ProdottoRisultato,
     ProfiloUtente,
     ValutazioneProdotto,
     ValutazioniRicerca,
@@ -24,11 +25,15 @@ _PROMPT_SISTEMA = (
 )
 
 
-def _costruisci_prompt_utente(
-    prodotti: list[ProdottoRisultato],
+def costruisci_contesto_utente(
     profilo: ProfiloUtente,
-    budget: float | None,
+    guardaroba: list[CapoGuardaroba] | None = None,
+    budget: float | None = None,
 ) -> str:
+    """Blocco testuale con fisico, taglie, stile, gusti, guardaroba e budget.
+
+    Condiviso tra valutazione prodotti (consulente) e proposte proattive (proposte.py).
+    """
     fisico = profilo.fisico
     dati_fisici = []
     if fisico.altezza_cm:
@@ -63,21 +68,15 @@ def _costruisci_prompt_utente(
     gusti_pos = ", ".join(profilo.gusti_positivi) if profilo.gusti_positivi else "nessuno registrato"
     gusti_neg = ", ".join(profilo.gusti_negativi) if profilo.gusti_negativi else "nessuno registrato"
 
-    # Includiamo la descrizione (venditore Vinted): spesso contiene le misure reali del capo.
-    # Troncata a 400 caratteri per non gonfiare il prompt su molti prodotti.
-    # "indice" (1..N) è la chiave di matching: più robusto che ricopiare URL lunghissimi.
-    prodotti_dump = []
-    for i, p in enumerate(prodotti, start=1):
-        d = p.model_dump()
-        d["indice"] = i
-        if d.get("descrizione"):
-            d["descrizione"] = d["descrizione"][:400]
-        prodotti_dump.append(d)
-    lista_prodotti = json.dumps(prodotti_dump, ensure_ascii=False, indent=2)
+    # Guardaroba: capi che l'utente già possiede → serve per abbinamenti e stile coerente.
+    # Troncato a 30 capi per non gonfiare il prompt.
+    capi = guardaroba or []
+    if capi:
+        sezione_guardaroba = "\n".join(f"- {c.descrizione}" for c in capi[:30])
+    else:
+        sezione_guardaroba = "Vuoto (nessun capo registrato)"
 
-    return f"""Valuta questi prodotti per l'utente {profilo.nome}:
-
-PROFILO FISICO:
+    return f"""PROFILO FISICO:
 {sezione_fisico}
 
 TAGLIE ABITUALI:
@@ -86,36 +85,86 @@ TAGLIE ABITUALI:
 STILE PREFERITO: {stili}
 GUSTI APPRESI — PIACCIONO: {gusti_pos}
 GUSTI APPRESI — DA EVITARE: {gusti_neg}
-BUDGET MASSIMO: {budget_str}
+GUARDAROBA ATTUALE (capi già posseduti):
+{sezione_guardaroba}
+BUDGET MASSIMO: {budget_str}"""
 
+
+def _costruisci_prompt_utente(
+    arricchiti: list[ProdottoArricchito],
+    profilo: ProfiloUtente,
+    budget: float | None,
+    guardaroba: list[CapoGuardaroba] | None = None,
+    target: MisureTarget | None = None,
+) -> str:
+    contesto = costruisci_contesto_utente(profilo, guardaroba, budget)
+
+    # Il confronto sulle misure è già stato fatto in valutazione/fit.py: qui arriva come
+    # dato ("fit"), non come compito. Al modello resta il giudizio su prezzo, stile e
+    # abbinamenti. "indice" (1..N) è la chiave di matching: più robusto degli URL lunghi.
+    prodotti_dump = []
+    for i, pa in enumerate(arricchiti, start=1):
+        d = pa.prodotto.model_dump(exclude={"foto"})
+        d["indice"] = i
+        if d.get("descrizione"):
+            d["descrizione"] = d["descrizione"][:400]
+        if pa.fit is not None:
+            d["fit"] = pa.fit.dettaglio
+        if pa.misure is not None:
+            d["misure_dichiarate_in"] = pa.misure.fonte
+        prodotti_dump.append(d)
+    lista_prodotti = json.dumps(prodotti_dump, ensure_ascii=False, indent=2)
+
+    sezione_target = ""
+    if target is not None:
+        from Ia_personal_shopper.valutazione.fit import descrivi_target
+        descrizione_target = descrivi_target(target)
+        if descrizione_target:
+            sezione_target = (
+                f"\nMISURE CERCATE PER QUESTO CAPO: {descrizione_target}\n"
+                "Il campo \"fit\" di ogni prodotto è già il confronto tra le misure dichiarate "
+                "dal venditore e queste: fidati di quel dato invece di ricalcolarlo dalla "
+                "descrizione. \"misure non dichiarate\" significa che il venditore non le ha "
+                "scritte, quindi il capo potrebbe andare bene o no: dillo nel commento.\n"
+            )
+
+    return f"""Valuta questi prodotti per l'utente {profilo.nome}:
+
+{contesto}
+{sezione_target}
 PRODOTTI DA VALUTARE:
 {lista_prodotti}
 
 Per ogni prodotto fornisci:
 - indice: il numero del prodotto (copia il campo "indice" dal JSON sopra)
-- si_adatta_fisico: true/false — se il capo si adatta al fisico e allo stile dell'utente
+- si_adatta_fisico: true/false — se il capo si adatta al fisico e allo stile dell'utente E si abbina bene ai capi già nel GUARDAROBA ATTUALE. Usa il campo "fit" come prova principale.
 - ottimo_affare: true/false — se il prezzo è buono rispetto al mercato
-- commento: massimo 12 parole, diretto e onesto (es. "Ottimo prezzo, L ti starà bene", "Troppo caro per quello che è"). Tieni conto dei gusti appresi.
+- commento: massimo 12 parole, diretto e onesto (es. "Ottimo prezzo, misure perfette per te", "Si abbina ai tuoi chino scuri", "Misure non dichiarate: chiedile al venditore"). Tieni conto dei gusti appresi e degli abbinamenti col guardaroba.
 - raccomandazione: "compra" | "considera" | "evita"
-- vestibilita: SE il campo "descrizione" del prodotto riporta misure del capo (es. spalle, petto/pit-to-pit, lunghezza, girovita), estraile e confrontale con le misure corporee dell'utente, poi dai un verdetto breve (es. "spalle 46cm vs tue 48 → stretto", "petto 56cm → vestibilità comoda"). Se la descrizione NON riporta misure, imposta vestibilita a null e valuta il fit solo da taglia+stile.
 
 Prodotti Vinted di seconda mano: considera la condizione nel prezzo.
 
 Restituisci SOLO un JSON valido con questa struttura:
-{{"valutazioni": [{{"indice": 1, "si_adatta_fisico": true, "ottimo_affare": true, "commento": "...", "raccomandazione": "compra", "vestibilita": null}}]}}"""
+{{"valutazioni": [{{"indice": 1, "si_adatta_fisico": true, "ottimo_affare": true, "commento": "...", "raccomandazione": "compra"}}]}}"""
 
 
 async def valuta_prodotti(
-    prodotti: list[ProdottoRisultato],
+    arricchiti: list[ProdottoArricchito],
     profilo: ProfiloUtente,
     budget: float | None,
+    guardaroba: list[CapoGuardaroba] | None = None,
+    target: MisureTarget | None = None,
 ) -> list[ProdottoArricchito]:
-    """Valuta tutti i prodotti in una singola chiamata Claude e li arricchisce con le opinioni."""
-    if not prodotti:
+    """Riempie il campo `valutazione` di ogni prodotto con una singola chiamata Claude.
+
+    I campi `misure` e `fit` sono già stati calcolati da valutazione/fit.py e vengono
+    passati al modello come dato di partenza, non ricalcolati.
+    """
+    if not arricchiti:
         return []
 
     client = anthropic.AsyncAnthropic()
-    prompt = _costruisci_prompt_utente(prodotti, profilo, budget)
+    prompt = _costruisci_prompt_utente(arricchiti, profilo, budget, guardaroba, target)
 
     try:
         risposta = await client.messages.create(
@@ -145,10 +194,6 @@ async def valuta_prodotti(
         v.indice: v for v in valutazioni_raw.valutazioni
     }
 
-    return [
-        ProdottoArricchito(
-            prodotto=p,
-            valutazione=mappa_val.get(i),
-        )
-        for i, p in enumerate(prodotti, start=1)
-    ]
+    for i, pa in enumerate(arricchiti, start=1):
+        pa.valutazione = mappa_val.get(i)
+    return arricchiti

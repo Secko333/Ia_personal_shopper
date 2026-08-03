@@ -29,18 +29,30 @@ COLOR_IDS = {
 
 _PROMPT = """Sei l'interprete delle ricerche di un personal shopper che cerca capi su Vinted.
 Trasforma la richiesta dell'utente in parametri di ricerca. Rispondi SOLO con JSON:
-{{"query": "...", "tipo_capo": "top|pantaloni|scarpe|altro", "colori": [...], "genere": "uomo"|"donna"|null}}
+{{"query": "...", "tipo_capo": "top|pantaloni|scarpe|altro", "colori": [...],
+  "genere": "uomo"|"donna"|null, "vestibilita": "aderente|regular|oversize",
+  "lunghezza": "corta|regular|lunga"}}
 
 Regole:
 - query: parole chiave essenziali e ottimizzate per il motore di ricerca Vinted, in italiano.
-  TOGLI dalla query: colori (vanno in "colori"), genere, budget e prezzi, parole vuote.
+  TOGLI dalla query: colori (vanno in "colori"), genere, budget e prezzi, parole vuote,
+  e le indicazioni di vestibilità o lunghezza (vanno nei campi dedicati: sono filtri sulle
+  misure reali del capo, e come parole di ricerca ridurrebbero i risultati).
   MANTIENI i dettagli distintivi del capo (es. "scollo a v", "bootcut", nome modello, brand).
 - tipo_capo: "top" (magliette, camicie, felpe, maglioni, giacche), "pantaloni" (anche jeans e shorts),
   "scarpe", "altro" (accessori, borse, ecc.).
 - colori: solo valori tra: {colori}. Se il colore richiesto non è in lista, lascialo nella query.
 - genere: solo se esplicito nella richiesta, altrimenti null.
+- vestibilita: quanto deve essere ampio il capo. "aderente" (slim, fit, stretto, attillato),
+  "oversize" (larga, boxy, comoda, ampia), "regular" se l'utente non lo dice.
+- lunghezza: quanto deve essere lungo. "corta" (croppata, crop, corta, sopra il fianco),
+  "lunga" (lunga, longline, oltre il fianco), "regular" se l'utente non lo dice.
+  I due campi sono indipendenti: "oversize croppata" → vestibilita oversize, lunghezza corta.
 
 Richiesta: {testo}"""
+
+_VESTIBILITA = ("aderente", "regular", "oversize")
+_LUNGHEZZE = ("corta", "regular", "lunga")
 
 
 async def interpreta_ricerca(testo: str, profilo: ProfiloUtente) -> ParametriRicerca:
@@ -67,6 +79,12 @@ async def interpreta_ricerca(testo: str, profilo: ProfiloUtente) -> ParametriRic
         params.genere = None
     params.genere = params.genere or rileva_genere(testo, default=profilo.genere)
     params.colori = [c for c in params.colori if c.lower() in COLOR_IDS]
+    # Valori fuori vocabolario ricadono su "regular": le misure target restano sensate
+    # anche per una richiesta che non dice niente sulla vestibilità.
+    if params.vestibilita not in _VESTIBILITA:
+        params.vestibilita = "regular"
+    if params.lunghezza not in _LUNGHEZZE:
+        params.lunghezza = "regular"
     return params
 
 
@@ -107,4 +125,14 @@ if __name__ == "__main__":
         assert "bianc" not in params.query.lower()
         assert params.tipo_capo == "top"
         assert params.colori == ["bianco"]
+        assert (params.vestibilita, params.lunghezza) == ("regular", "regular")
+
+        crop = asyncio.run(interpreta_ricerca("maglietta a manica corta un po' croppata", p))
+        print(crop)
+        assert crop.lunghezza == "corta", crop
+        assert "cropp" not in crop.query.lower(), crop.query   # va nel campo, non nella query
+
+        over = asyncio.run(interpreta_ricerca("felpa oversize croppata nera", p))
+        print(over)
+        assert (over.vestibilita, over.lunghezza) == ("oversize", "corta"), over
     print("OK")

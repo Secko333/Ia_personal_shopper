@@ -19,6 +19,9 @@ class ProdottoRisultato(BaseModel):
     immagine_url: str | None = None
     condizione: str | None = None        # Vinted: "ottimo stato", "buone condizioni", ecc.
     descrizione: str | None = None       # testo venditore (Vinted): spesso contiene le misure del capo
+    foto: list[str] = Field(default_factory=list)   # tutte le foto (Vinted le dà gratis nella lista API):
+                                                    # le misure col metro stanno spesso dalla terza in poi
+    rilevanza: int = 0                   # posizione nell'ordine di rilevanza del sito, 0 = primo
 
 
 class RisultatiRicerca(BaseModel):
@@ -32,6 +35,9 @@ class ParametriRicerca(BaseModel):
     tipo_capo: str = "altro"                          # "top" | "pantaloni" | "scarpe" | "altro"
     colori: list[str] = Field(default_factory=list)   # nomi colore italiani mappabili su color_ids Vinted
     genere: str | None = None                         # "uomo" | "donna" | None
+    # Due assi indipendenti, non un enum unico: così "oversize croppata" resta esprimibile.
+    vestibilita: str = "regular"                      # "aderente" | "regular" | "oversize" → larghezze
+    lunghezza: str = "regular"                        # "corta" | "regular" | "lunga" → lunghezza
 
 
 # ---------------------------------------------------------------------------
@@ -44,11 +50,57 @@ class ValutazioneProdotto(BaseModel):
     ottimo_affare: bool
     commento: str                    # max ~15 parole, diretto e onesto
     raccomandazione: str             # "compra" | "considera" | "evita"
-    vestibilita: str | None = None   # es. "spalle 46cm vs tue 48 → stretto" (se il capo riporta misure)
 
 
 class ValutazioniRicerca(BaseModel):
     valutazioni: list[ValutazioneProdotto] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Misure: target derivate dal profilo vs misure reali del capo (vedi valutazione/fit.py)
+# ---------------------------------------------------------------------------
+
+class MisureCapo(BaseModel):
+    """Misure del singolo capo, come dichiarate dal venditore. Le larghezze sono già
+    normalizzate a misura piatta (ascella-ascella), non circonferenza."""
+    spalle_cm: float | None = None
+    petto_flat_cm: float | None = None
+    lunghezza_cm: float | None = None
+    vita_flat_cm: float | None = None
+    lunghezza_interna_cm: float | None = None
+    fonte: str | None = None         # "descrizione" | "foto" | None
+
+
+class MisureTarget(BaseModel):
+    """Misure che il capo dovrebbe avere per vestire come richiesto, derivate dal profilo."""
+    spalle_cm: float | None = None
+    petto_flat_cm: float | None = None
+    lunghezza_cm: float | None = None
+    vita_flat_cm: float | None = None
+    lunghezza_interna_cm: float | None = None
+
+
+class EsitoFit(BaseModel):
+    punteggio: float                 # 0..1, media pesata sulle sole misure presenti
+    confidenza: float                # 0..1, quota di peso coperta da misure note (0 = nessuna misura)
+    scartato: bool = False
+    motivo_scarto: str | None = None  # "lunghezza 78 vs 64 (+14)"
+    scarto_max_cm: float = 0.0       # scarto peggiore su una misura prioritaria, in cm
+    dettaglio: str = ""              # "spalle 52 ✓ · lungh 66 ✓ · petto n/d"
+
+
+class ReportFit(BaseModel):
+    """Contabilità della selezione per misure, da stampare in CLI."""
+    attivo: bool = False             # False = niente misure target utili per questo tipo di capo
+    target: MisureTarget = Field(default_factory=MisureTarget)
+    candidati: int = 0
+    scartati: int = 0
+    miglior_scartato: str | None = None   # "spalle 47 (−5)": segnala quando conviene allargare la soglia
+    letti_da_foto: int = 0
+    # Errori di estrazione tenuti distinti per stadio: senza segnalarli, una chiave API
+    # rotta o un rate limit è indistinguibile da "nessun venditore ha scritto le misure".
+    errore_descrizioni: bool = False   # la chiamata sulle descrizioni è fallita (tutti i capi)
+    errori_foto: int = 0               # letture dalle foto fallite (solo quei capi)
 
 
 # ---------------------------------------------------------------------------
@@ -105,9 +157,37 @@ class ListaPreferiti(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Guardaroba (capi posseduti) e proposte proattive
+# ---------------------------------------------------------------------------
+
+class CapoGuardaroba(BaseModel):
+    id: str
+    aggiunto_il: str
+    descrizione: str            # "giacca di jeans blu Levi's" — testo libero, letto dall'LLM
+
+
+class ListaGuardaroba(BaseModel):
+    versione: int = 1
+    capi: list[CapoGuardaroba] = Field(default_factory=list)
+
+
+class Proposta(BaseModel):
+    titolo: str                 # "Blazer beige per i tuoi chino scuri"
+    motivo: str                 # perché: completa il guardaroba / valorizza il fisico / gusto
+    ricerche: list[str] = Field(default_factory=list)   # 1 query = capo singolo; 2-3 = outfit
+
+
+class ProposteRicerca(BaseModel):
+    """Wrapper per il parse JSON delle proposte (vedi ricerca/proposte.py)."""
+    proposte: list[Proposta] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
 # Prodotto arricchito (risultato + valutazione) per il display
 # ---------------------------------------------------------------------------
 
 class ProdottoArricchito(BaseModel):
     prodotto: ProdottoRisultato
     valutazione: ValutazioneProdotto | None = None
+    misure: MisureCapo | None = None     # misure dichiarate dal venditore, se trovate
+    fit: EsitoFit | None = None          # confronto con le target (None = fit non valutabile)

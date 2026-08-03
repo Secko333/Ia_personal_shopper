@@ -266,7 +266,11 @@ I default `"regular"` fanno sì che una richiesta senza indicazioni di vestibili
 | `valutazione/consulente.py` | il prompt riceve target e misure estratte; non stima più `vestibilita` |
 | `cli/loop.py` | orchestrazione: target → ricerca → estrazione → punteggio → vision → riordino |
 | `cli/display.py` | riga fit deterministica, riga target, contabilità scarti |
-| `config.py` | `MAX_CANDIDATI_FIT = 60` |
+| `config.py` | `MAX_CANDIDATI_FIT = 60`, `MAX_RISULTATI_FINALI = 12`, `MAX_CAPI_VISION = 6` |
+| `ricerca/aggregatore.py` | `filtra_e_ordina(limite=…)`: tagliare a 20 affamava il ranking |
+
+`ValutazioneProdotto.vestibilita` è stato rimosso: era la stima libera di Haiku, ora
+sostituita dal confronto deterministico in `EsitoFit.dettaglio`.
 
 ## Test
 
@@ -285,6 +289,82 @@ non banale su dati reali già raccolti:
 
 La parte LLM (estrazione da descrizioni e foto) richiede rete e chiave API: gira solo se
 `ANTHROPIC_API_KEY` è presente, come già fa `interprete.py`.
+
+## Scoperto durante l'implementazione
+
+Cinque cose che il design non prevedeva e che sono state necessarie per far funzionare la
+feature. Tutte verificate sul campo.
+
+### 1. La query va spinta verso i capi che dichiarano le misure (il fix decisivo)
+
+Con una query normale **lo 0% dei risultati dichiara le misure**: il ranking non aveva
+niente da confrontare e ogni capo finiva "in forse". `search_text` di Vinted cerca anche
+nelle descrizioni, quindi aggiungere il vocabolario delle misure cambia la popolazione:
+
+| query | capi con misure dichiarate |
+|---|---|
+| `maglietta manica corta` | 0% |
+| `maglietta manica corta misure` | 10% |
+| `t-shirt uomo misure spalle lunghezza` | **75%** |
+
+`coordinatore._cerca_vinted` fa quindi **due ricerche unite**: 2/3 del budget candidati
+alla query spinta sulle misure, 1/3 alla query normale per non perdere copertura. Le parole
+sono adattate al tipo di capo (`misure spalle lunghezza` per i top, `misure vita lunghezza`
+per i pantaloni). Sequenziali, non parallele: condividono la sessione `curl_cffi`
+module-level. La `rilevanza` viene riassegnata sull'ordine unito.
+
+### 2. Paginazione: senza, i 60 candidati richiesti erano 28
+
+`per_page` è tappato a 96 dall'API (192 torna 96) e il filtro taglia post-fetch ne scarta
+oltre metà. La prima esecuzione reale consegnava 28 candidati su 60 richiesti, in silenzio.
+`cerca_vinted` ora pagina fino a `_MAX_PAGINE = 3` finché non raggiunge il numero chiesto,
+deduplicando per id (le pagine Vinted si sovrappongono del 15% circa).
+
+### 3. Lo spareggio è la rilevanza, non il prezzo
+
+Ordinare a pari fit per prezzo crescente riempiva la lista di magliette da €2 senza misure
+al posto dei capi pertinenti. `ProdottoRisultato.rilevanza` conserva la posizione
+nell'ordine di rilevanza del sito, assegnata prima di qualsiasi riordino, e
+`_chiave_ordine` la usa come ultimo criterio.
+
+### 4. Banda di plausibilità sui numeri estratti
+
+Sul campo si trovano "Spalle 90cm" e "Spalle 18,5cm". Un numero fuori dalla banda
+plausibile per un capo da adulto vale come **non dichiarato**, non come misura sbagliata da
+confrontare: altrimenti sporca il punteggio e fa scartare capi buoni.
+
+Correzione collegata: il dimezzamento circonferenza→flat si applica solo a **petto e
+vita**, dove la circonferenza è una convenzione reale. Sulle spalle non esiste: 90cm di
+spalle è un errore del venditore, non 45cm di misura piatta.
+
+### 5. Gli errori di estrazione vanno mostrati, non inghiottiti
+
+Il design faceva ricadere ogni errore LLM su "capo senza misure". In pratica questo ha
+mascherato una chiave API non caricata facendola sembrare "nessun venditore ha scritto le
+misure" — e ha depistato anche durante lo sviluppo. Ora:
+
+- `estrai_da_descrizioni` distingue `None` (chiamata fallita) da `{}` (nessuna misura
+  dichiarata), e il report alza `errore_descrizioni`;
+- `_misure_da_foto` lascia propagare gli errori di chiamata, contati in `errori_foto`;
+- la CLI stampa un avviso rosso esplicito quando la lettura è fallita per un problema
+  tecnico, così il degrado non passa per un dato di fatto.
+
+### Esito su una ricerca reale
+
+`"voglio una maglietta a manica corta un po' croppata, max 30€"` con il profilo
+di Riccardo (194cm, spalle 58, petto 102):
+
+```
+🎯 Misure cercate (top): spalle ~52cm · petto ~51cm · lungh ~64cm
+60 candidati · ✂ 24 scartati fuori misura (il più vicino: lungh 70 vs 64 (+6)) · 📷 1 misure lette dalle foto
+
+1  T-shirt uomo verdone Benetton TG L   €3   ✅ COMPRA
+                                             🎯 SU MISURA  lungh 65 ✓ · spalle 50 ✓ · petto 55 (+4, largo)
+```
+
+La soglia a 4cm si conferma severa come previsto: 24 capi su 60 scartati, e il "più
+vicino" sfora di 6cm. `SCARTO_MAX_CM` in cima a `fit.py` è il numero da alzare se le liste
+risultano troppo corte.
 
 ## Fuori scopo
 

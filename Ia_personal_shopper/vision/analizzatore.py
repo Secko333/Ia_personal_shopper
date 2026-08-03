@@ -101,6 +101,48 @@ async def descrivi_immagine(path_immagine: str) -> str:
     return risposta.content[0].text.strip()
 
 
+PROMPT_OUTFIT = (
+    "Sei un assistente di moda italiano. Questa è una foto di ispirazione: un outfit o un capo "
+    "che piace all'utente. Individua OGNI capo d'abbigliamento distinto indossato/mostrato "
+    "(es. giacca, maglia, pantaloni, scarpe) e per ciascuno scrivi UNA query di ricerca concisa "
+    "per trovarne uno SIMILE su un sito di moda: includi tipo, colore, materiale apparente e stile. "
+    "Ignora accessori minori (gioielli, orologi). Se c'è un solo capo, restituisci una sola query. "
+    "Rispondi con UNA query per riga, nient'altro (niente numeri, niente trattini)."
+)
+
+
+async def estrai_capi_da_outfit(path_immagine: str) -> list[str]:
+    """Scompone una foto di outfit/ispirazione in una lista di query di ricerca (una per capo)."""
+    path = Path(path_immagine).expanduser().resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"Immagine non trovata: {path}")
+
+    b64, media_type = _leggi_immagine(path)
+
+    client = anthropic.AsyncAnthropic()
+    risposta = await client.messages.create(
+        model=MODELLO_VISION,
+        max_tokens=512,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
+                    {"type": "text", "text": PROMPT_OUTFIT},
+                ],
+            }
+        ],
+    )
+    testo = risposta.content[0].text.strip()
+    capi = []
+    for riga in testo.splitlines():
+        # ripulisce eventuali bullet/numeri iniziali che il modello potrebbe aggiungere
+        riga = riga.lstrip("-•*0123456789. ").strip()
+        if riga:
+            capi.append(riga)
+    return capi
+
+
 PROMPT_STILE = (
     "Sei uno stylist. Osserva questo capo o outfit di ispirazione e deduci lo STILE personale "
     "di chi lo ama. Elenca da 3 a 6 descrittori di stile brevi (1-2 parole ciascuno), in italiano, "

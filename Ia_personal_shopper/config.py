@@ -8,6 +8,7 @@ CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 PROFILO_PATH = CONFIG_DIR / "profilo.json"
 PREFERITI_PATH = CONFIG_DIR / "preferiti.json"
+GUARDAROBA_PATH = CONFIG_DIR / "guardaroba.json"
 BROWSER_DATA_DIR = CONFIG_DIR / "browser"
 BROWSER_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -30,6 +31,16 @@ DOMINI_SITI = {
 MAX_STEPS_RICERCA = 25
 MAX_RISULTATI_PER_SITO = 12
 MAX_RISULTATI_TOTALI = 20
+
+# Ranking per misure (vedi valutazione/fit.py): si pesca largo e si tengono i capi
+# più centrati sulle misure target. Il costo dominante è l'arricchimento delle
+# descrizioni in vinted_api (1 GET + 0.3s per capo): 60 candidati ≈ 22s per ricerca.
+# Se le ricerche diventano troppo lente, questo è il numero da abbassare.
+MAX_CANDIDATI_FIT = 60
+MAX_RISULTATI_FINALI = 12
+
+# Fallback vision: quanti capi senza misure nella descrizione mandare a leggere dalle foto.
+MAX_CAPI_VISION = 6
 
 # Delay iniziale tra lanci agenti (anti-bot, in secondi)
 DELAY_MIN_AGENTE = 0.5

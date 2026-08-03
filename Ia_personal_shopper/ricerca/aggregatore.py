@@ -26,13 +26,18 @@ def filtra_e_ordina(
     prodotti: list[ProdottoRisultato],
     budget: float | None,
     brand_esclusi: list[str] | None = None,
+    limite: int = MAX_RISULTATI_TOTALI,
 ) -> list[ProdottoRisultato]:
     """
     1. Deduplica per URL normalizzato.
     2. Filtra per brand esclusi.
     3. Filtra per budget (prodotti senza prezzo vengono tenuti ma posizionati in fondo).
     4. Ordina per prezzo crescente (None in fondo).
-    5. Tronca a MAX_RISULTATI_TOTALI.
+    5. Tronca a `limite`.
+
+    `limite` è il pool di candidati passato al ranking per misure (valutazione/fit.py),
+    non il numero di risultati mostrati: tagliare qui a 20 lascerebbe al fit troppo poco
+    materiale su cui scegliere.
     """
     brand_esclusi_lower = {b.lower() for b in (brand_esclusi or [])}
 
@@ -63,7 +68,7 @@ def filtra_e_ordina(
     con_prezzo = sorted([p for p in unici if p.prezzo is not None], key=lambda p: p.prezzo)  # type: ignore[arg-type]
     senza_prezzo = [p for p in unici if p.prezzo is None]
 
-    return (con_prezzo + senza_prezzo)[:MAX_RISULTATI_TOTALI]
+    return (con_prezzo + senza_prezzo)[:limite]
 
 
 _PATTERN_BUDGET = re.compile(
