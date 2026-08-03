@@ -33,6 +33,7 @@ from Ia_personal_shopper.models import (
     ProfiloUtente,
     ReportFit,
 )
+from Ia_personal_shopper.profilo.gusti import affinita_gusto, vocabolari_gusto
 
 # ---------------------------------------------------------------------------
 # Taratura — unico punto da correggere quando i consigli sbagliano di qualche cm
@@ -243,17 +244,36 @@ def valuta(misure: MisureCapo | None, target: MisureTarget, tipo_capo: str) -> E
     )
 
 
+def fascia(esito: EsitoFit | None) -> int:
+    """Fascia grossa di fit, 0 = migliore, 3 = senza misure.
+
+    Si ordina per fascia e non per punteggio esatto perché le differenze fini (0.95 contro
+    0.93) sono rumore: nascono da bande di tolleranza a gradini, non da una misura più
+    precisa. Dentro la fascia decide il gusto (vedi _chiave_ordine).
+    """
+    if esito is None or esito.confidenza == 0:
+        return 3
+    if esito.punteggio >= 0.85:
+        return 0
+    if esito.punteggio >= 0.6:
+        return 1
+    return 2
+
+
+# Indicizzate per fascia: etichetta e stile Rich restano allineati alle soglie di ordinamento.
+_ETICHETTE_FASCIA = [
+    ("🎯 SU MISURA", "bold cyan"),
+    ("● OK", "cyan"),
+    ("◌ APPROSSIMATIVO", "yellow"),
+    ("📏 misure non dichiarate", "dim"),
+]
+
+
 def etichetta_fit(esito: EsitoFit | None) -> tuple[str, str]:
     """(testo, stile Rich) per la riga fit in tabella."""
     if esito is None:
         return "", "dim"
-    if esito.confidenza == 0:
-        return "📏 misure non dichiarate", "dim"
-    if esito.punteggio >= 0.85:
-        return "🎯 SU MISURA", "bold cyan"
-    if esito.punteggio >= 0.6:
-        return "● OK", "cyan"
-    return "◌ APPROSSIMATIVO", "yellow"
+    return _ETICHETTE_FASCIA[fascia(esito)]
 
 
 # ---------------------------------------------------------------------------
@@ -418,18 +438,20 @@ async def _misure_da_foto(prodotto: ProdottoRisultato) -> MisureCapo | None:
 # ---------------------------------------------------------------------------
 
 def _chiave_ordine(pa: ProdottoArricchito):
-    """Prima i capi con misure dichiarate, ordinati per fit; poi quelli "in forse".
+    """Fascia di fit, poi affinità di gusto, poi rilevanza del sito.
 
-    A pari fit lo spareggio è la rilevanza del sito, non il prezzo: ordinare per prezzo
-    crescente riempiva la lista di magliette da 2€ senza misure invece dei capi
-    effettivamente pertinenti alla ricerca.
+    L'affinità sta dentro la fascia e non sopra: un capo del gusto giusto che non entra
+    resta inutile. Ma dentro la stessa fascia il gusto viene prima del fit fine, perché la
+    differenza tra 0.95 e 0.93 non si vede addosso mentre quella tra una band tee e una
+    polo Ralph Lauren sì.
+
+    Lo spareggio finale è la rilevanza, non il prezzo: ordinare per prezzo crescente
+    riempiva la lista di magliette da 2€ invece dei capi pertinenti.
     """
-    e = pa.fit
-    misurato = e is not None and e.confidenza > 0
     return (
-        0 if misurato else 1,
-        -(e.punteggio if e else 0.0),
-        -(e.confidenza if e else 0.0),
+        fascia(pa.fit),
+        -pa.affinita_gusto,
+        -(pa.fit.confidenza if pa.fit else 0.0),
         pa.prodotto.rilevanza,
     )
 
@@ -447,8 +469,18 @@ async def seleziona(
     target = misure_target(profilo, params.tipo_capo, params.vestibilita, params.lunghezza)
     report = ReportFit(target=target, candidati=len(prodotti))
 
+    positivi, negativi = vocabolari_gusto(profilo)
+
+    def con_gusto(p: ProdottoRisultato, **kw) -> ProdottoArricchito:
+        return ProdottoArricchito(
+            prodotto=p, affinita_gusto=affinita_gusto(p, positivi, negativi), **kw
+        )
+
     if params.tipo_capo not in PESI or not descrivi_target(target):
-        return [ProdottoArricchito(prodotto=p) for p in prodotti], report
+        # Nessuna misura da confrontare: resta il gusto a decidere l'ordine.
+        arricchiti = [con_gusto(p) for p in prodotti]
+        arricchiti.sort(key=_chiave_ordine)
+        return arricchiti[:MAX_RISULTATI_FINALI], report
 
     report.attivo = True
     misure_per_indice = await estrai_da_descrizioni(prodotti)
@@ -474,7 +506,7 @@ async def seleziona(
         if esito.scartato:
             registra_scarto(esito)
             continue
-        arricchiti.append(ProdottoArricchito(prodotto=p, misure=misure, fit=esito))
+        arricchiti.append(con_gusto(p, misure=misure, fit=esito))
 
     # Vision solo sui capi che entrerebbero in lista e non hanno misure: le foto sono
     # gratis in HTTP ma non in token, quindi il numero è limitato.
@@ -606,5 +638,28 @@ if __name__ == "__main__":
         key=_chiave_ordine,
     )
     assert [pa.prodotto.nome for pa in per_rilevanza] == ["pertinente", "junk-2euro"]
+
+    # Fasce ed etichette non possono divergere: sono indicizzate dalla stessa funzione
+    assert fascia(None) == 3 and etichetta_fit(e_nulla)[0] == "📏 misure non dichiarate"
+    assert fascia(valuta(perfetto, t, "top")) == 0
+    assert fascia(e_dick) == 1, e_dick.punteggio
+    assert len(_ETICHETTE_FASCIA) == 4
+
+    # Dentro la stessa fascia decide il gusto, non il punteggio fine
+    fuori_gusto = _pa("Polo Ralph Lauren", 30, perfetto, rilevanza=0)
+    di_gusto = _pa("Band tee vintage", 30, dickies, rilevanza=9)
+    di_gusto.affinita_gusto = 3
+    assert fascia(fuori_gusto.fit) == 0 and fascia(di_gusto.fit) == 1
+    # ...ma la fascia resta sopra il gusto: un capo che non veste non serve
+    assert [pa.prodotto.nome for pa in sorted([di_gusto, fuori_gusto], key=_chiave_ordine)] == [
+        "Polo Ralph Lauren", "Band tee vintage"
+    ]
+
+    # Stessa fascia, gusto diverso → vince il gusto anche se la rilevanza è peggiore
+    a_pari = _pa("Hugo Boss", 30, dickies, rilevanza=0)
+    assert fascia(a_pari.fit) == fascia(di_gusto.fit)
+    assert [pa.prodotto.nome for pa in sorted([a_pari, di_gusto], key=_chiave_ordine)] == [
+        "Band tee vintage", "Hugo Boss"
+    ]
 
     print("OK")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,6 +53,59 @@ def profilo_default() -> ProfiloUtente:
     )
 
 
+# Vocabolari per separare quel che l'intervista aveva impastato in preferenze_stile.
+# Il confronto è su voce intera, non per sottostringa: "slim rock" è uno stile, non la
+# vestibilità "slim".
+_VESTIBILITA_NOTE = {
+    "aderente": "aderente", "slim": "aderente", "attillato": "aderente",
+    "skinny": "aderente", "fit": "aderente", "stretto": "aderente",
+    "regular": "regular", "normale": "regular", "classica": "regular",
+    "oversize": "oversize", "largo": "oversize", "larga": "oversize", "boxy": "oversize",
+    "comodo": "oversize", "comoda": "oversize", "ampio": "oversize", "ampia": "oversize",
+}
+_OCCASIONI_NOTE = {
+    "serate", "serata", "sera", "tempo libero", "lavoro", "ufficio", "sport", "palestra",
+    "cerimonia", "cerimonie", "viaggio", "viaggi", "università", "universita", "scuola",
+    "aperitivo", "weekend", "casa", "vacanza", "vacanze",
+}
+
+
+def _migra_v2(profilo: ProfiloUtente) -> ProfiloUtente:
+    """Separa stili, colori, occasioni e vestibilità finiti tutti in preferenze_stile.
+
+    L'intervista di stile scriveva ogni risposta in un unico campo, quindi il vocabolario
+    usato per costruire le query di ricerca conteneva anche "nero", "serate" e "aderente".
+    Deterministico e senza rete: la migrazione gira al caricamento del profilo.
+    """
+    from Ia_personal_shopper.ricerca.interprete import COLOR_IDS  # import locale: il livello
+    # profilo non deve dipendere da quello di ricerca a import time
+
+    voci: list[str] = []
+    for grezza in profilo.preferenze_stile:
+        voci += [v.strip() for v in re.split(r"[;,]", grezza) if v.strip()]
+
+    stili, colori, occasioni = [], [], []
+    for voce in voci:
+        chiave = voce.lower()
+        if chiave in COLOR_IDS:
+            colori.append(chiave)
+        elif chiave in _OCCASIONI_NOTE:
+            occasioni.append(chiave)
+        elif chiave in _VESTIBILITA_NOTE:
+            # Il profilo di partenza può contenerne più di una ("aderente" e "regular"):
+            # vince la prima, correggibile con /profilo modifica.
+            if profilo.vestibilita_preferita is None:
+                profilo.vestibilita_preferita = _VESTIBILITA_NOTE[chiave]
+        else:
+            stili.append(voce)
+
+    profilo.preferenze_stile = stili
+    _append_dedup(profilo.colori_preferiti, colori)
+    _append_dedup(profilo.occasioni, occasioni)
+    profilo.versione = 2
+    return profilo
+
+
 def carica_profilo() -> ProfiloUtente:
     if not PROFILO_PATH.exists():
         profilo = profilo_default()
@@ -59,9 +113,14 @@ def carica_profilo() -> ProfiloUtente:
         return profilo
     try:
         data = json.loads(PROFILO_PATH.read_text(encoding="utf-8"))
-        return ProfiloUtente.model_validate(data)
+        profilo = ProfiloUtente.model_validate(data)
     except Exception:
         return profilo_default()
+
+    if profilo.versione < 2:
+        profilo = _migra_v2(profilo)
+        salva_profilo(profilo)
+    return profilo
 
 
 def salva_profilo(profilo: ProfiloUtente) -> None:
@@ -113,6 +172,32 @@ def _append_dedup(lista: list[str], valori: list[str]) -> None:
 def aggiungi_stile(descrittori: list[str]) -> None:
     profilo = carica_profilo()
     _append_dedup(profilo.preferenze_stile, descrittori)
+    salva_profilo(profilo)
+
+
+def aggiorna_preferenze(
+    stili: list[str] | None = None,
+    colori: list[str] | None = None,
+    occasioni: list[str] | None = None,
+    vestibilita: str | None = None,
+    da_evitare: list[str] | None = None,
+) -> None:
+    """Scrive ogni preferenza nel proprio campo (usata da /stile intervista).
+
+    Tenerle separate all'origine è quel che impedisce a colori e occasioni di finire nel
+    vocabolario di stile con cui si costruiscono le query di ricerca.
+    """
+    profilo = carica_profilo()
+    if stili:
+        _append_dedup(profilo.preferenze_stile, stili)
+    if colori:
+        _append_dedup(profilo.colori_preferiti, colori)
+    if occasioni:
+        _append_dedup(profilo.occasioni, occasioni)
+    if vestibilita in ("aderente", "regular", "oversize"):
+        profilo.vestibilita_preferita = vestibilita
+    if da_evitare:
+        _append_dedup(profilo.gusti_negativi, da_evitare)
     salva_profilo(profilo)
 
 
@@ -173,3 +258,39 @@ def rimuovi_capo(id_capo: str) -> bool:
         salva_guardaroba(lista)
         return True
     return False
+
+
+if __name__ == "__main__":
+    # Self-check della migrazione v1→v2: pura, nessuna rete, nessun file toccato.
+    grezzo = ProfiloUtente(
+        versione=1,
+        preferenze_stile=[
+            "Grunge; Alt-Rock; Modern Western; Indie; Slim Rock",
+            "aderente", "regular", "nero", "bianco", "marrone", "blu", "verde",
+            "serate", "tempo libero",
+        ],
+    )
+    m = _migra_v2(grezzo)
+
+    assert m.versione == 2
+    # La stringa impastata dall'intervista diventa cinque stili distinti
+    assert m.preferenze_stile == [
+        "Grunge", "Alt-Rock", "Modern Western", "Indie", "Slim Rock"
+    ], m.preferenze_stile
+    # "Slim Rock" resta uno stile: il confronto è su voce intera, non per sottostringa
+    assert "Slim Rock" in m.preferenze_stile
+    assert m.colori_preferiti == ["nero", "bianco", "marrone", "blu", "verde"]
+    assert m.occasioni == ["serate", "tempo libero"]
+    # Due vestibilità in conflitto: vince la prima
+    assert m.vestibilita_preferita == "aderente", m.vestibilita_preferita
+
+    # Idempotente: rieseguirla non sposta nulla
+    di_nuovo = _migra_v2(m.model_copy(deep=True))
+    assert di_nuovo.preferenze_stile == m.preferenze_stile
+    assert di_nuovo.colori_preferiti == m.colori_preferiti
+
+    # Profilo già pulito o vuoto: nessun danno
+    vuoto = _migra_v2(ProfiloUtente(versione=1))
+    assert vuoto.preferenze_stile == [] and vuoto.vestibilita_preferita is None
+
+    print("OK")

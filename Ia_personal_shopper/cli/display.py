@@ -213,6 +213,8 @@ def stampa_profilo(profilo: ProfiloUtente) -> None:
         righe_taglie.append(f"Scarpe: [bold]{taglie.scarpe}[/bold]")
 
     stili = ", ".join(profilo.preferenze_stile) if profilo.preferenze_stile else "non specificato"
+    colori_pref = ", ".join(profilo.colori_preferiti) if profilo.colori_preferiti else "—"
+    occasioni = ", ".join(profilo.occasioni) if profilo.occasioni else "—"
     siti = ", ".join(profilo.siti_attivi) if profilo.siti_attivi else "nessuno"
     gusti_pos = ", ".join(profilo.gusti_positivi) if profilo.gusti_positivi else "—"
     gusti_neg = ", ".join(profilo.gusti_negativi) if profilo.gusti_negativi else "—"
@@ -223,7 +225,11 @@ def stampa_profilo(profilo: ProfiloUtente) -> None:
         + ("\n".join(righe_fisico) if righe_fisico else "[dim]Non inserite[/dim]")
         + "\n\n[underline]Taglie abituali:[/underline]\n"
         + ("\n".join(righe_taglie) if righe_taglie else "[dim]Non inserite[/dim]")
-        + f"\n\n[underline]Stile preferito:[/underline] {stili}"
+        + f"\n\n[underline]Stili:[/underline] {stili} [dim](entrano nelle ricerche)[/dim]"
+        f"\n[underline]Colori preferiti:[/underline] {colori_pref}"
+        f"\n[underline]Occasioni:[/underline] {occasioni}"
+        f"\n[underline]Vestibilità preferita:[/underline] "
+        f"{profilo.vestibilita_preferita or 'non specificata'}"
         f"\n[underline]Gusti — piacciono:[/underline] {gusti_pos}"
         f"\n[underline]Gusti — da evitare:[/underline] {gusti_neg}"
         f"\n[underline]Genere:[/underline] {profilo.genere or 'nessun filtro'}"

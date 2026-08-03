@@ -53,28 +53,37 @@ def _cerca_vinted(
     budget: float | None,
     profilo: ProfiloUtente,
 ) -> list[ProdottoRisultato]:
-    """Due ricerche unite: una spinta sui capi che dichiarano le misure, una generica.
+    """Una ricerca per variante di gusto, più quella neutra, unite in un solo pool.
 
-    Il budget di candidati è ripartito 2/3 alla prima, così il ranking per misure ha
-    materiale da confrontare senza perdere la copertura della ricerca normale.
-    Sequenziali e non parallele: condividono la sessione curl_cffi module-level.
+    Le varianti di gusto vanno per prime: su una query neutra Vinted restituisce il
+    mainstream (Hugo Boss, Disney, Guess), quindi nessun riordino a valle può produrre una
+    lista di gusto — bisogna pescare diverso. L'ordine determina anche la `rilevanza`, che
+    è lo spareggio quando le misure non discriminano, così i capi di gusto vincono i pari.
+
+    Il budget di candidati è ripartito tra le varianti: nessun costo in più, cambia solo da
+    dove arrivano. Sequenziali e non parallele: condividono la sessione curl_cffi.
     """
     comune = dict(
         taglie=taglie_per_tipo(params.tipo_capo, profilo),
         catalog_ids=_CATALOG_ID_GENERE.get(params.genere),
         color_ids=color_ids(params.colori),
     )
-    quota_misurati = MAX_CANDIDATI_FIT * 2 // 3
     parole = _PAROLE_MISURE.get(params.tipo_capo, "misure")
+    # Solo varianti di gusto quando ci sono: la query neutra portava esclusivamente
+    # mainstream (Hugo Boss, Disney, Tommy, Liu Jo) e, avendo spesso misure complete e fit
+    # regolare, occupava le prime posizioni. Le varianti da sole danno ~58 candidati unici,
+    # quindi il pool non si assottiglia. Se l'interprete non ne genera — richiesta già
+    # specifica, es. "t-shirt dei Ramones" — la neutra riprende tutto il budget.
+    varianti = params.varianti_gusto or [params.query]
+    quota = max(MAX_CANDIDATI_FIT // len(varianti), 10)
 
-    prodotti = vinted_api.cerca_vinted(
-        f"{params.query} {parole}", budget, per_page=quota_misurati, **comune
-    )
-    prodotti += vinted_api.cerca_vinted(
-        params.query, budget, per_page=MAX_CANDIDATI_FIT - quota_misurati, **comune
-    )
+    prodotti: list[ProdottoRisultato] = []
+    for variante in varianti:
+        prodotti += vinted_api.cerca_vinted(
+            f"{variante} {parole}", budget, per_page=quota, **comune
+        )
 
-    # Rilevanza riassegnata sull'ordine unito: le due chiamate la numerano da 0 ciascuna.
+    # Rilevanza riassegnata sull'ordine unito: ogni chiamata la numera da 0.
     for posizione, p in enumerate(prodotti):
         p.rilevanza = posizione
     return prodotti

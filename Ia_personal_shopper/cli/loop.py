@@ -26,6 +26,7 @@ from Ia_personal_shopper.cli.display import (
 from Ia_personal_shopper.config import SITI_SUPPORTATI
 from Ia_personal_shopper.models import ProdottoArricchito
 from Ia_personal_shopper.profilo.gestore import (
+    aggiorna_preferenze,
     aggiungi_capo,
     aggiungi_gusti,
     aggiungi_preferito,
@@ -36,6 +37,7 @@ from Ia_personal_shopper.profilo.gestore import (
     rimuovi_capo,
     salva_profilo,
 )
+from Ia_personal_shopper.profilo.gusti import descrittore_stile
 from Ia_personal_shopper.ricerca.aggregatore import estrai_budget
 from Ia_personal_shopper.ricerca.coordinatore import cerca_su_tutti_i_siti
 from Ia_personal_shopper.ricerca.interprete import interpreta_ricerca, taglie_per_tipo
@@ -90,6 +92,11 @@ async def _cmd_ricerca(testo: str) -> None:
     if budget:
         dettagli.append(f"max €{budget:.0f}")
     console.print(f"[dim]🧠 {' · '.join(dettagli)}[/dim]")
+    if params.varianti_gusto:
+        console.print(
+            f"[magenta]🎨 Cerco anche sul tuo gusto:[/magenta] "
+            + " · ".join(f"'[bold]{v}[/bold]'" for v in params.varianti_gusto)
+        )
 
     # Le misure target rese esplicite prima di cercare: sono il criterio di selezione.
     target = misure_target(profilo, params.tipo_capo, params.vestibilita, params.lunghezza)
@@ -218,15 +225,27 @@ def _cmd_link(argomenti: str) -> None:
     console.print(f"[bold]{prodotto.nome}[/bold]\n[link={prodotto.url}]{prodotto.url}[/link]")
 
 
-def _cmd_feedback(argomenti: str, positivo: bool) -> None:
-    """Registra un gusto appreso dal prodotto N (segnale: il brand)."""
+async def _cmd_feedback(argomenti: str, positivo: bool) -> None:
+    """Registra un gusto appreso dal prodotto N.
+
+    Il segnale è un descrittore di stile ("band tee nera anni 90"), non il brand: entra
+    nelle varianti di gusto delle ricerche successive, mentre un nome di negozio no.
+    """
     prodotto = _prodotto_da_indice(argomenti)
     if prodotto is None:
         return
-    segnale = prodotto.brand or prodotto.nome
+
+    with Status("[cyan]Capisco cosa ti piace di questo capo...[/cyan]", console=console):
+        segnale = await descrittore_stile(prodotto)
+    if segnale is None:
+        segnale = prodotto.brand or prodotto.nome   # fallback: meglio il brand che niente
+
     if positivo:
         aggiungi_gusti(positivi=[segnale])
-        console.print(f"[green]👍 Registrato: ti piace [bold]{segnale}[/bold]. Ne terrò conto.[/green]")
+        console.print(
+            f"[green]👍 Registrato: ti piace [bold]{segnale}[/bold].[/green] "
+            "[dim]Lo userò per cercare capi simili.[/dim]"
+        )
     else:
         aggiungi_gusti(negativi=[segnale])
         console.print(f"[yellow]👎 Registrato: eviterò [bold]{segnale}[/bold] in futuro.[/yellow]")
@@ -374,11 +393,20 @@ async def _cmd_stile_intervista() -> None:
     import anthropic
     from Ia_personal_shopper.config import MODELLO_VALUTAZIONE
 
+    # Ogni risposta va nel proprio campo: gli stili finiscono nelle query di ricerca, i
+    # colori e le occasioni solo nel giudizio. Impastarli — come faceva la versione
+    # precedente — riempiva il vocabolario di ricerca di "nero" e "serate".
     prompt = (
-        "Da queste risposte di un utente su gusti e stile, estrai due liste JSON di tag brevi "
-        "(1-2 parole, in italiano): 'stile' (descrittori positivi di stile/preferenze) e "
-        "'da_evitare' (cose che l'utente non vuole). Rispondi SOLO con JSON "
-        '{"stile": [...], "da_evitare": [...]}.\n\nRisposte:\n' + "\n".join(risposte)
+        "Da queste risposte di un utente su gusti e stile, estrai tag brevi (1-3 parole, in "
+        "italiano) smistandoli nei campi giusti. Rispondi SOLO con JSON:\n"
+        '{"stili": [...], "colori": [...], "occasioni": [...], '
+        '"vestibilita": "aderente"|"regular"|"oversize"|null, "da_evitare": [...]}\n\n'
+        "- stili: solo estetiche e sottoculture (es. grunge, workwear, modern western). "
+        "NON metterci colori, occasioni o vestibilità.\n"
+        "- colori: solo nomi di colore.\n"
+        "- occasioni: contesti d'uso (es. lavoro, serate, tempo libero).\n"
+        "- vestibilita: come preferisce che i capi vestano, null se non emerge.\n"
+        "- da_evitare: cose che l'utente non vuole.\n\nRisposte:\n" + "\n".join(risposte)
     )
     try:
         with Status("[cyan]Costruisco il tuo profilo di gusto...[/cyan]", console=console):
@@ -391,17 +419,29 @@ async def _cmd_stile_intervista() -> None:
         import json
         testo = resp.content[0].text
         dati = json.loads(testo[testo.find("{"):testo.rfind("}") + 1])
-        stile = dati.get("stile", [])
-        da_evitare = dati.get("da_evitare", [])
+        stili = dati.get("stili") or []
+        colori = dati.get("colori") or []
+        occasioni = dati.get("occasioni") or []
+        vestibilita = dati.get("vestibilita")
+        da_evitare = dati.get("da_evitare") or []
     except Exception as e:
         console.print(f"[red]Errore nell'elaborazione: {e}[/red]")
         return
 
-    if stile:
-        aggiungi_stile(stile)
-    if da_evitare:
-        aggiungi_gusti(negativi=da_evitare)
-    console.print(f"[green]✅ Profilo aggiornato.[/green] Stile: {', '.join(stile) or '—'}")
+    aggiorna_preferenze(
+        stili=stili,
+        colori=colori,
+        occasioni=occasioni,
+        vestibilita=vestibilita,
+        da_evitare=da_evitare,
+    )
+    console.print(f"[green]✅ Profilo aggiornato.[/green] Stili: {', '.join(stili) or '—'}")
+    if colori:
+        console.print(f"[dim]Colori: {', '.join(colori)}[/dim]")
+    if occasioni:
+        console.print(f"[dim]Occasioni: {', '.join(occasioni)}[/dim]")
+    if vestibilita:
+        console.print(f"[dim]Vestibilità preferita: {vestibilita}[/dim]")
     if da_evitare:
         console.print(f"[dim]Da evitare: {', '.join(da_evitare)}[/dim]")
 
@@ -514,11 +554,29 @@ def _cmd_profilo_modifica() -> None:
     ).strip().lower()
     profilo.genere = genere_str if genere_str in ("uomo", "donna") else None
 
+    # Campi separati: solo gli stili entrano nelle query di ricerca, quindi tenerci dentro
+    # colori e occasioni degradava le ricerche.
     stili_str = Prompt.ask(
-        "  Stili preferiti (separati da virgola)",
+        "  Stili — estetiche e sottoculture, es. grunge, modern western (virgola)",
         default=", ".join(profilo.preferenze_stile),
     )
     profilo.preferenze_stile = [s.strip() for s in stili_str.split(",") if s.strip()]
+
+    colori_str = Prompt.ask(
+        "  Colori preferiti (virgola)", default=", ".join(profilo.colori_preferiti)
+    )
+    profilo.colori_preferiti = [c.strip() for c in colori_str.split(",") if c.strip()]
+
+    occasioni_str = Prompt.ask(
+        "  Occasioni d'uso, es. serate, lavoro (virgola)", default=", ".join(profilo.occasioni)
+    )
+    profilo.occasioni = [o.strip() for o in occasioni_str.split(",") if o.strip()]
+
+    vest_str = Prompt.ask(
+        "  Vestibilità preferita (aderente/regular/oversize, Invio per nessuna)",
+        default=profilo.vestibilita_preferita or "",
+    ).strip().lower()
+    profilo.vestibilita_preferita = vest_str if vest_str in ("aderente", "regular", "oversize") else None
 
     budget_str = Prompt.ask("  Budget default (€)", default=str(profilo.budget_default))
     try:
@@ -624,10 +682,10 @@ async def avvia() -> None:
             await _cmd_stile(testo[len("/stile"):])
 
         elif testo == "/mipiace" or testo.startswith("/mipiace "):
-            _cmd_feedback(testo[len("/mipiace"):].strip(), positivo=True)
+            await _cmd_feedback(testo[len("/mipiace"):].strip(), positivo=True)
 
         elif testo == "/nonmipiace" or testo.startswith("/nonmipiace "):
-            _cmd_feedback(testo[len("/nonmipiace"):].strip(), positivo=False)
+            await _cmd_feedback(testo[len("/nonmipiace"):].strip(), positivo=False)
 
         elif testo.startswith("/"):
             console.print(f"[red]Comando non riconosciuto: {testo}[/red] — usa [bold]/aiuto[/bold]")

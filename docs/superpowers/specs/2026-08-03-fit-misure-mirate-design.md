@@ -366,6 +366,132 @@ La soglia a 4cm si conferma severa come previsto: 24 capi su 60 scartati, e il "
 vicino" sfora di 6cm. `SCARTO_MAX_CM` in cima a `fit.py` è il numero da alzare se le liste
 risultano troppo corte.
 
+## Seconda tornata: il gusto (2026-08-03)
+
+Le misure funzionavano, ma la prima ricerca reale non conteneva un solo capo gradito. Causa:
+**lo stile influenzava il giudizio, non il recupero.** Le `preferenze_stile` arrivavano solo
+al prompt del consulente, a valle, quando la lista era già stata pescata. Si pescava il
+mainstream e lo si etichettava correttamente come non gradito.
+
+Misurato sul campo, stessa taglia e stesso budget:
+
+| query | cosa torna |
+|---|---|
+| `maglietta manica corta` | Hugo Boss, Disney Lion King, Ralph Lauren, Liu Jo, Guess |
+| `t-shirt band rock vintage` | AC/DC, Mötley Crüe, Blink 182, Vasco Rossi, Led Zeppelin |
+
+La palette colori del profilo come filtro API **non serve**: restituisce gli stessi Hugo
+Boss e Guess, solo neri. Non è il colore, è il vocabolario di stile.
+
+### Profilo: campi separati (`versione: 2`)
+
+`/stile intervista` scriveva ogni risposta in `preferenze_stile`, che quindi conteneva
+stili, colori, occasioni e vestibilità impastati — e i cinque stili schiacciati in una
+stringa sola. Il vocabolario con cui si costruiscono le query conteneva "nero" e "serate".
+
+`gestore._migra_v2` separa in `preferenze_stile` / `colori_preferiti` / `occasioni` /
+`vestibilita_preferita`. Deterministica, senza rete, al caricamento del profilo: i colori si
+riconoscono da `COLOR_IDS`, le occasioni e le vestibilità da vocabolari espliciti. Il
+confronto è su voce intera, non per sottostringa, o "Slim Rock" diventerebbe la vestibilità
+"slim". Anche il prompt dell'intervista è stato riscritto per smistare all'origine,
+altrimenti la prossima intervista rimescolerebbe tutto.
+
+Effetto collaterale utile: `vestibilita_preferita` diventa il default quando la richiesta
+non dice come deve vestire. Prima "cerca una t-shirt nera" usava sempre `regular`,
+ignorando che l'utente preferisce aderente.
+
+### Varianti di gusto: sono l'unica ricerca eseguita
+
+L'interprete genera 0-2 query alternative combinando il capo richiesto col vocabolario di
+stile dell'utente, e `coordinatore._cerca_vinted` cerca **solo** su quelle, ripartendo il
+budget candidati. La query neutra viene usata solo quando le varianti mancano — richiesta
+già specifica ("t-shirt dei Ramones") o varianti tutte scartate.
+
+La fetta neutra è stata eliminata perché portava esclusivamente mainstream e, avendo spesso
+misure complete e fit regolare, occupava le prime posizioni. Le varianti da sole danno ~58
+candidati unici: il pool non si assottiglia.
+
+### Tre presidi deterministici sul prompt
+
+La qualità delle varianti oscillava tra esecuzioni identiche: una volta
+`"t-shirt grunge single stitch"`, quella dopo `"t-shirt vintage maniche corte"` — che
+riporta il mainstream, perché su Vinted "vintage" lo scrive metà dei venditori. Con le
+varianti come unica ricerca, una variante debole costa l'intera lista.
+
+Il prompt da solo non è affidabile. Tre controlli in Python, ognuno con il suo self-check:
+
+- `_variante_discriminante`: una variante deve contenere un termine di sottocultura, scena
+  o dettaglio costruttivo. Le epoche (`EPOCHE_GENERICHE`) non contano.
+- `_togli_vestibilita`: i termini di sola vestibilità escono dalla query. Volutamente non
+  tocca "corta"/"lunga"/"larga": lì distinguono il capo, e togliere "lunga" da "manica
+  lunga" lo rovina.
+- `_togli_colori`: un colore già estratto in `colori` è un filtro API, nella query è rumore.
+  Con concordanza di genere e numero ("bianco" → bianca, bianchi, bianche), e attenzione
+  alle radici vicine: `rosa` non deve mangiare `rossa`.
+
+Dopo questi controlli, tre esecuzioni della stessa richiesta danno varianti identiche.
+
+### Affinità di gusto nell'ordinamento
+
+`profilo/gusti.affinita_gusto` conta quanti termini del vocabolario dell'utente compaiono
+nel titolo, meno il doppio di quelli da evitare. La ricerca Vinted è fuzzy: anche cercando
+"band tee alt rock single stitch" tornano Shein e Maison Margiela.
+
+`_chiave_ordine` diventa `(fascia di fit, −affinità, −confidenza, rilevanza)`. La fascia sta
+**sopra** l'affinità — un capo del gusto giusto che non veste resta inutile — ma dentro la
+fascia l'affinità viene prima del punteggio fine, perché la differenza tra 0.95 e 0.93
+nasce da bande a gradini e non si vede addosso, mentre quella tra una band tee e una polo
+Ralph Lauren sì.
+
+Due errori di principio commessi e corretti, entrambi lo stesso: **un termine che non
+discrimina non è gusto.**
+
+1. All'inizio le varianti generate entravano nel vocabolario di affinità. Con "t-shirt
+   vintage" tra le varianti, "Ralph Lauren Blu Navy 90s Vintage" prendeva lo stesso punto
+   di una band tee grunge. Il vocabolario ora si costruisce **solo** dal profilo: le
+   varianti servono a pescare, il profilo a giudicare.
+2. `EPOCHE_GENERICHE` e i nomi di colore vanno esclusi da qualunque fonte, incluso un
+   descrittore appreso da `/mipiace` tipo "band tee **nera** stampa rock **anni 2000**":
+   altrimenti qualunque capo nero prende un punto, Hugo Boss compreso.
+
+### Apprendimento: descrittori, non brand
+
+`/mipiace` salvava il brand. "Vintage Dressing" è un negozio, non uno stile, e non serve a
+costruire una ricerca. Ora `profilo/gusti.descrittore_stile` ricava dall'articolo un
+descrittore breve e riusabile come termine di ricerca, che entra nel vocabolario di gusto:
+
+```
+T-Shirt AC/DC - For Those About To Rock  →  "band tee nera stampa rock anni 2000"
+Camicia Lee Western Nera Vintage         →  "camicia western nera denim vintage"
+```
+
+Risposte più lunghe di dieci parole vengono rifiutate: significa che il modello ha spiegato
+invece di descrivere, e una frase intera dentro le query di ricerca fa più danni che bene.
+
+### Esito
+
+`"maglietta t-shirt a maniche corte"`, la richiesta che non aveva prodotto niente di
+gradito:
+
+```
+🎨 Cerco anche sul tuo gusto: 'band tee rock maniche corte' · 't-shirt grunge single stitch'
+🎯 Misure cercate (top): spalle ~50cm · petto ~48cm · lungh ~72cm
+
+1  Maglietta vintage Da Vinci Rock vitruvian y2k   €14  🎯 SU MISURA  petto 50 ✓ (dalle foto)
+2  Vintage 2000s T-Shirt Guns N' Roses             €15  ● OK  lungh 68 (−4) · spalle 48 ✓
+6  T-Shirt AC/DC - For Those About To Rock         €13  📏 misure non dichiarate
+9  shirt vintage rock eagle lupo single stitch     €35  📏 misure non dichiarate
+```
+
+Nessun Hugo Boss, nessun Disney, nessuna camicia a maniche corte al posto di una t-shirt.
+
+### Fragilità residua
+
+Il vocabolario di gusto dell'utente è ancora sottile: cinque nomi di stile e, all'inizio,
+nessun descrittore appreso. L'affinità è quindi un segnale sparso — quando scatta è
+significativo, ma su molti capi vale 0 e decide la rilevanza Vinted. Si infittisce con
+l'uso di `/mipiace`.
+
 ## Fuori scopo
 
 - Zara e Zalando: non espongono le misure del singolo capo, restano sul filtro taglia.

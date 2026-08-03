@@ -36,8 +36,13 @@ class ParametriRicerca(BaseModel):
     colori: list[str] = Field(default_factory=list)   # nomi colore italiani mappabili su color_ids Vinted
     genere: str | None = None                         # "uomo" | "donna" | None
     # Due assi indipendenti, non un enum unico: così "oversize croppata" resta esprimibile.
-    vestibilita: str = "regular"                      # "aderente" | "regular" | "oversize" → larghezze
-    lunghezza: str = "regular"                        # "corta" | "regular" | "lunga" → lunghezza
+    # None dall'LLM = la richiesta non lo dice → si ricade sul profilo (vedi interpreta_ricerca),
+    # dopo il quale sono sempre valorizzati.
+    vestibilita: str | None = None                     # "aderente" | "regular" | "oversize" → larghezze
+    lunghezza: str | None = None                       # "corta" | "regular" | "lunga" → lunghezza
+    # Query alternative che spingono verso i gusti dell'utente. Senza, Vinted restituisce il
+    # mainstream: misurato lo 0% di capi di gusto su una query neutra (vedi coordinatore).
+    varianti_gusto: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -126,12 +131,19 @@ class TaglieUtente(BaseModel):
 
 
 class ProfiloUtente(BaseModel):
-    versione: int = 1
+    versione: int = 2                        # 2 = stili/colori/occasioni separati (vedi gestore._migra_v2)
     nome: str = "Utente"
     fisico: FisicoUtente = Field(default_factory=FisicoUtente)
     taglie: TaglieUtente = Field(default_factory=TaglieUtente)
     genere: str | None = None                # "uomo" | "donna" | None (nessun filtro)
-    preferenze_stile: list[str] = Field(default_factory=list)
+    # Campi separati perché finiscono in posti diversi: gli stili entrano nelle query di
+    # ricerca (è il vocabolario che decide COSA viene pescato), i colori e le occasioni
+    # servono solo al giudizio del consulente.
+    preferenze_stile: list[str] = Field(default_factory=list)   # "grunge", "modern western", ...
+    colori_preferiti: list[str] = Field(default_factory=list)   # "nero", "verde", ...
+    occasioni: list[str] = Field(default_factory=list)          # "serate", "tempo libero", ...
+    vestibilita_preferita: str | None = None  # "aderente" | "regular" | "oversize": default
+                                              # quando la richiesta non dice come deve vestire
     gusti_positivi: list[str] = Field(default_factory=list)   # appreso da feedback/foto: cosa piace
     gusti_negativi: list[str] = Field(default_factory=list)   # appreso da feedback: cosa evitare
     brand_esclusi: list[str] = Field(default_factory=list)
@@ -191,3 +203,5 @@ class ProdottoArricchito(BaseModel):
     valutazione: ValutazioneProdotto | None = None
     misure: MisureCapo | None = None     # misure dichiarate dal venditore, se trovate
     fit: EsitoFit | None = None          # confronto con le target (None = fit non valutabile)
+    affinita_gusto: int = 0              # termini di stile dell'utente presenti nel titolo:
+                                         # rompe i pari dentro la stessa fascia di fit

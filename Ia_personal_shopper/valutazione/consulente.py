@@ -60,6 +60,9 @@ def costruisci_contesto_utente(
         taglie_info.append(f"Scarpe: {profilo.taglie.scarpe}")
 
     stili = ", ".join(profilo.preferenze_stile) if profilo.preferenze_stile else "non specificato"
+    colori_pref = ", ".join(profilo.colori_preferiti) if profilo.colori_preferiti else "nessuna preferenza"
+    occasioni = ", ".join(profilo.occasioni) if profilo.occasioni else "non specificate"
+    vestibilita_pref = profilo.vestibilita_preferita or "non specificata"
     budget_str = f"{budget:.0f}€" if budget else f"{profilo.budget_default:.0f}€ (default)"
 
     sezione_fisico = "\n".join(dati_fisici) if dati_fisici else "Non specificato"
@@ -83,6 +86,9 @@ TAGLIE ABITUALI:
 {sezione_taglie}
 
 STILE PREFERITO: {stili}
+COLORI PREFERITI: {colori_pref}
+OCCASIONI D'USO: {occasioni}
+VESTIBILITÀ PREFERITA: {vestibilita_pref}
 GUSTI APPRESI — PIACCIONO: {gusti_pos}
 GUSTI APPRESI — DA EVITARE: {gusti_neg}
 GUARDAROBA ATTUALE (capi già posseduti):
