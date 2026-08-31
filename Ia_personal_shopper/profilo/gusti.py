@@ -8,6 +8,7 @@ varianti di gusto delle ricerche successive (vedi ricerca/interprete.py).
 
 from __future__ import annotations
 
+import json
 import re
 
 import anthropic
@@ -75,6 +76,61 @@ _TROPPO_GENERICHE = {
     "jeans", "pantaloni", "pantalone", "camicia", "felpa", "scarpe", "polo", "bermuda",
     "cotone", "nuovo", "nuova", "usato", "originale", "vera", "vero",
 } | EPOCHE_GENERICHE
+
+
+_PROMPT_FEED = """Questi sono i capi che il sistema di raccomandazione di Vinted consiglia a
+un utente, quindi riflettono i suoi gusti reali osservati dal suo comportamento.
+
+Ricava da 3 a 6 termini di STILE ricorrenti, utilizzabili come termini di ricerca su Vinted.
+
+Regole:
+- ogni termine da 1 a 3 parole: sottoculture, scene, epoche con stile, dettagli
+  costruttivi, o brand che definiscono uno stile ("carhartt", "single stitch", "band tee")
+- solo ciò che RICORRE: ignora il capo isolato che non c'entra col resto
+- NON termini generici che valgono per qualunque capo ("cotone", "maglietta", "uomo",
+  "nuovo", nomi di colore da soli)
+- se i capi non hanno nessuno stile comune riconoscibile, restituisci una lista vuota
+
+Rispondi SOLO con JSON: {{"stili": ["...", "..."]}}
+
+CAPI CONSIGLIATI:
+{titoli}"""
+
+
+async def impara_da_feed(prodotti: list[ProdottoRisultato]) -> list[str]:
+    """Termini di stile ricorrenti nei capi consigliati dal feed Vinted.
+
+    Il recommender di Vinted è addestrato sul comportamento reale dell'utente, quindi come
+    fonte di gusto batte qualunque vocabolario scritto a mano. Da qui i termini entrano nel
+    vocabolario di affinità e nella scelta del termine di stile delle ricerche.
+
+    ATTENZIONE al chiamante: da sessione anonima il feed NON è personalizzato (mostra
+    Barbie e gonne leopardate), e impararci sopra avvelenerebbe il profilo. Chiamare solo
+    con sessione autenticata.
+    """
+    titoli = [f"- {p.nome}" for p in prodotti if p.nome]
+    if not titoli:
+        return []
+
+    try:
+        client = anthropic.AsyncAnthropic()
+        resp = await client.messages.create(
+            model=MODELLO_VALUTAZIONE,
+            max_tokens=300,
+            messages=[{"role": "user", "content": _PROMPT_FEED.format(titoli="\n".join(titoli))}],
+        )
+        raw = resp.content[0].text
+        dati = json.loads(raw[raw.find("{"):raw.rfind("}") + 1])
+    except Exception:
+        return []
+
+    stili = []
+    for voce in dati.get("stili") or []:
+        voce = str(voce).strip()
+        # Un termine lunghissimo è una frase, non uno stile: nelle query farebbe danni.
+        if voce and len(voce.split()) <= 3:
+            stili.append(voce)
+    return stili[:6]
 
 
 def _nomi_colore() -> frozenset[str]:

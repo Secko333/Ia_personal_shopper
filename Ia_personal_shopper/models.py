@@ -18,6 +18,10 @@ class ProdottoRisultato(BaseModel):
     sito: str                            # "zalando" | "zara" | "vinted"
     immagine_url: str | None = None
     condizione: str | None = None        # Vinted: "ottimo stato", "buone condizioni", ecc.
+    # Letti dal titolo/descrizione insieme alle misure (una sola chiamata, vedi
+    # valutazione/fit.estrai_da_descrizioni): None = il venditore non li ha scritti.
+    colore: str | None = None            # "nero", "verde militare"
+    fit_dichiarato: str | None = None    # "oversize", "slim", "vestibilità ampia"
     descrizione: str | None = None       # testo venditore (Vinted): spesso contiene le misure del capo
     foto: list[str] = Field(default_factory=list)   # tutte le foto (Vinted le dà gratis nella lista API):
                                                     # le misure col metro stanno spesso dalla terza in poi
@@ -40,10 +44,11 @@ class ParametriRicerca(BaseModel):
     # dopo il quale sono sempre valorizzati.
     vestibilita: str | None = None                     # "aderente" | "regular" | "oversize" → larghezze
     lunghezza: str | None = None                       # "corta" | "regular" | "lunga" → lunghezza
-    # UN solo termine di stile da aggiungere alla fetta secondaria della ricerca. Uno, non
-    # una query intera: la ricerca Vinted è un'intersezione, e ogni parola di gusto in più
-    # fa crollare la quota di capi che dichiarano le misure (misurato: 65% → 5%).
-    termine_stile: str | None = None
+    # Termini di stile dell'utente, UNO PER RICERCA SEPARATA (max 3). Non si sommano nella
+    # stessa query: la ricerca Vinted è un'intersezione, e ogni parola di gusto in più fa
+    # crollare la quota di capi che dichiarano le misure (misurato: 65% → 5%). Query distinte
+    # invece coprono più gusto senza pagare quel prezzo (vedi ricerca/coordinatore._cerca_vinted).
+    termini_stile: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -87,12 +92,24 @@ class MisureTarget(BaseModel):
 
 
 class EsitoFit(BaseModel):
-    punteggio: float                 # 0..1, media pesata sulle sole misure presenti
+    # Classe esplicita invece di dedurla da una media pesata: con la media, un capo con il
+    # petto sbagliato di 9cm risultava "su misura" perché le altre due misure compensavano.
+    classe: int = 2                  # 0 = su misura · 1 = misure parziali · 2 = non dichiarate
+    punteggio: float                 # 0..1, precisione sulle misure dichiarate (solo spareggio)
     confidenza: float                # 0..1, quota di peso coperta da misure note (0 = nessuna misura)
     scartato: bool = False
     motivo_scarto: str | None = None  # "lunghezza 78 vs 64 (+14)"
     scarto_max_cm: float = 0.0       # scarto peggiore su una misura prioritaria, in cm
     dettaglio: str = ""              # "spalle 52 ✓ · lungh 66 ✓ · petto n/d"
+
+
+class ParereCapo(BaseModel):
+    """Parere argomentato su un singolo capo (vedi valutazione/parere.py)."""
+    verdetto: str                    # "compra" | "considera" | "evita"
+    sintesi: str
+    a_favore: list[str] = Field(default_factory=list)
+    contro: list[str] = Field(default_factory=list)
+    da_chiedere: list[str] = Field(default_factory=list)   # cosa domandare al venditore
 
 
 class ReportFit(BaseModel):
@@ -102,11 +119,11 @@ class ReportFit(BaseModel):
     candidati: int = 0
     scartati: int = 0
     miglior_scartato: str | None = None   # "spalle 47 (−5)": segnala quando conviene allargare la soglia
-    letti_da_foto: int = 0
-    # Errori di estrazione tenuti distinti per stadio: senza segnalarli, una chiave API
-    # rotta o un rate limit è indistinguibile da "nessun venditore ha scritto le misure".
+    fuori_taglia: int = 0             # taglia dichiarata (anche nel titolo) incompatibile
+    in_coda: int = 0                  # senza misure dichiarate: mostrati solo su richiesta
+    # Senza segnalarlo, una chiave API rotta o un rate limit è indistinguibile da "nessun
+    # venditore ha scritto le misure".
     errore_descrizioni: bool = False   # la chiamata sulle descrizioni è fallita (tutti i capi)
-    errori_foto: int = 0               # letture dalle foto fallite (solo quei capi)
 
 
 # ---------------------------------------------------------------------------

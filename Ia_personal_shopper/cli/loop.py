@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import re
+from pathlib import Path
 
 from rich.prompt import Confirm, Prompt
 from rich.status import Status
 
+from Ia_personal_shopper import vinted_api
 from Ia_personal_shopper.browser import vinted as vinted_browser
 from Ia_personal_shopper.browser.agente_base import crea_agente_carrello
 from Ia_personal_shopper.cli.display import (
     console,
     stampa_aiuto,
     stampa_banner,
+    stampa_coda,
     stampa_guardaroba,
+    stampa_parere,
     stampa_preferiti,
     stampa_profilo,
     stampa_proposte,
@@ -24,7 +28,11 @@ from Ia_personal_shopper.cli.display import (
     stampa_target_fit,
 )
 from Ia_personal_shopper.config import SITI_SUPPORTATI
-from Ia_personal_shopper.models import ProdottoArricchito
+from Ia_personal_shopper.models import (
+    ParametriRicerca,
+    ProdottoArricchito,
+    ProdottoRisultato,
+)
 from Ia_personal_shopper.profilo.gestore import (
     aggiorna_preferenze,
     aggiungi_capo,
@@ -37,17 +45,32 @@ from Ia_personal_shopper.profilo.gestore import (
     rimuovi_capo,
     salva_profilo,
 )
-from Ia_personal_shopper.profilo.gusti import descrittore_stile
+from Ia_personal_shopper.profilo.gusti import descrittore_stile, impara_da_feed
 from Ia_personal_shopper.ricerca.aggregatore import estrai_budget
 from Ia_personal_shopper.ricerca.coordinatore import cerca_su_tutti_i_siti
-from Ia_personal_shopper.ricerca.interprete import interpreta_ricerca, taglie_per_tipo
+from Ia_personal_shopper.ricerca.interprete import (
+    interpreta_ricerca,
+    taglie_per_tipo,
+    tipo_capo_da_titolo,
+)
 from Ia_personal_shopper.ricerca.proposte import genera_proposte
 from Ia_personal_shopper.valutazione.consulente import valuta_prodotti
-from Ia_personal_shopper.valutazione.fit import misure_target, seleziona
+from Ia_personal_shopper.valutazione.fit import (
+    descrivi_target,
+    estrai_da_descrizioni,
+    misure_da_immagini,
+    misure_target,
+    ordina_per_fit,
+    seleziona,
+    unisci_misure,
+    valuta,
+)
+from Ia_personal_shopper.valutazione.parere import parere_su_capo
 from Ia_personal_shopper.vision.analizzatore import (
     descrivi_immagine,
     estrai_capi_da_outfit,
     estrai_stile_da_immagine,
+    leggi_immagine,
 )
 
 # ---------------------------------------------------------------------------
@@ -55,6 +78,7 @@ from Ia_personal_shopper.vision.analizzatore import (
 # ---------------------------------------------------------------------------
 
 _ultima_ricerca: list[ProdottoArricchito] = []
+_ultima_coda: list[ProdottoArricchito] = []
 _ultima_query: str = ""
 
 
@@ -63,7 +87,7 @@ _ultima_query: str = ""
 # ---------------------------------------------------------------------------
 
 async def _cmd_ricerca(testo: str) -> None:
-    global _ultima_ricerca, _ultima_query
+    global _ultima_ricerca, _ultima_coda, _ultima_query
 
     profilo = carica_profilo()
     budget = estrai_budget(testo)
@@ -92,10 +116,11 @@ async def _cmd_ricerca(testo: str) -> None:
     if budget:
         dettagli.append(f"max €{budget:.0f}")
     console.print(f"[dim]🧠 {' · '.join(dettagli)}[/dim]")
-    if params.termine_stile:
+    if params.termini_stile:
+        elenco = ", ".join(f"'[bold]{t}[/bold]'" for t in params.termini_stile)
         console.print(
-            f"[magenta]🎨 Una parte della ricerca aggiunge il tuo stile:[/magenta] "
-            f"'[bold]{params.termine_stile}[/bold]'"
+            f"[magenta]🎨 Metà della ricerca insegue il tuo stile,[/magenta] "
+            f"una passata per ciascuno: {elenco}"
         )
 
     # Le misure target rese esplicite prima di cercare: sono il criterio di selezione.
@@ -113,15 +138,24 @@ async def _cmd_ricerca(testo: str) -> None:
         return
 
     with Status("[cyan]Leggo le misure dei capi...[/cyan]", console=console):
-        prodotti_arricchiti, report = await seleziona(prodotti_raw, profilo, params)
+        prodotti_arricchiti, coda, report = await seleziona(prodotti_raw, profilo, params)
 
     stampa_report_fit(report)
 
     if not prodotti_arricchiti:
-        console.print(
-            "[yellow]Tutti i candidati sono fuori misura.[/yellow] Prova ad allargare la "
-            "richiesta, oppure alza [bold]SCARTO_MAX_CM[/bold] in valutazione/fit.py."
-        )
+        if coda:
+            console.print(
+                "[yellow]Nessuno con misure dichiarate, ma ho messo in coda "
+                f"{len(coda)} capi senza misure.[/yellow] Usa [bold]/coda[/bold] per vederli."
+            )
+        else:
+            console.print(
+                "[yellow]Tutti i candidati sono fuori misura.[/yellow] Prova ad allargare la "
+                "richiesta, oppure alza [bold]SCARTO_MAX_CM[/bold] in valutazione/fit.py."
+            )
+        _ultima_ricerca = []
+        _ultima_coda = coda
+        _ultima_query = testo
         return
 
     console.print(f"[dim]💭 Elaboro le valutazioni per {len(prodotti_arricchiti)} prodotti...[/dim]")
@@ -131,9 +165,264 @@ async def _cmd_ricerca(testo: str) -> None:
     )
 
     _ultima_ricerca = prodotti_arricchiti
+    _ultima_coda = coda
     _ultima_query = testo
 
     stampa_risultati(prodotti_arricchiti, testo)
+
+    if coda:
+        console.print(
+            f"\n[dim]🕗 {len(coda)} capi in coda senza misure. Usa [bold]/coda[/bold] per vederli.[/dim]"
+        )
+
+
+async def _cmd_login() -> None:
+    """Apre la finestra dove l'utente accede a Vinted da sé (serve al feed personalizzato)."""
+    if await asyncio.to_thread(vinted_api.sessione_autenticata):
+        console.print("[green]✅ Sei già autenticato su Vinted.[/green] Usa [bold]/feed[/bold].")
+        return
+
+    console.print(
+        "[cyan]Provo prima a usare la sessione Vinted del tuo Chrome.[/cyan]\n"
+        "[dim]macOS chiederà il permesso di leggere la chiave 'Chrome Safe Storage': va "
+        "approvato. Vengono letti solo i due token di sessione di vinted.it, nient'altro "
+        "del tuo Chrome, e nessuna password.[/dim]"
+    )
+    await asyncio.to_thread(vinted_api._get_session, True)
+    if await asyncio.to_thread(vinted_api.sessione_autenticata):
+        console.print(
+            "[green]✅ Uso la sessione già aperta nel tuo Chrome.[/green] "
+            "Nessun accesso da rifare. Ora [bold]/feed[/bold] usa i tuoi consigli."
+        )
+        return
+
+    console.print(
+        "\n[yellow]Nel Chrome non ho trovato una sessione Vinted valida.[/yellow] "
+        "Apro una finestra del browser come ripiego.\n"
+        "[dim]Accedi tu con le tue credenziali: il programma non le chiede, non le legge e "
+        "non le salva. Legge soltanto i cookie di sessione che il browser scrive su disco.[/dim]"
+    )
+    # In un thread: l'API sincrona di Playwright non può girare dentro l'event loop asyncio.
+    if not await asyncio.to_thread(vinted_browser.apri_login):
+        console.print(
+            "[red]Non sono riuscito ad aprire la finestra.[/red] "
+            "Verifica che Playwright sia installato: [bold]uv run playwright install chromium[/bold]"
+        )
+        return
+
+    # La sessione in memoria ha ancora i cookie anonimi: va ricreata per rileggere il profilo.
+    await asyncio.to_thread(vinted_api._get_session, True)
+    if await asyncio.to_thread(vinted_api.sessione_autenticata):
+        console.print("[green]✅ Accesso riuscito.[/green] Ora [bold]/feed[/bold] usa i tuoi consigli.")
+    else:
+        console.print(
+            "[yellow]Non vedo una sessione autenticata.[/yellow] Se hai completato l'accesso, "
+            "riprova con [bold]/login[/bold]; il feed nel frattempo resta quello generico."
+        )
+
+
+async def _cmd_feed() -> None:
+    """Filtra i capi che Vinted ti consiglia, tenendo quelli che ti stanno davvero.
+
+    Il gusto lo scegli tu navigando Vinted (il recommender impara dai capi che guardi e
+    salvi); al programma resta il confronto sulle misure.
+    """
+    global _ultima_ricerca, _ultima_query
+
+    profilo = carica_profilo()
+    autenticato = await asyncio.to_thread(vinted_api.sessione_autenticata)
+    if not autenticato:
+        console.print(
+            "[yellow]⚠ Sessione anonima:[/yellow] il feed di Vinted non è personalizzato "
+            "(mostra capi generici, non i tuoi consigli). Usa [bold]/login[/bold] per "
+            "collegare il tuo account.\n"
+            "[dim]Procedo comunque sul feed generico, senza imparare nulla dai tuoi gusti.[/dim]"
+        )
+
+    with Status("[cyan]Leggo i capi che Vinted ti consiglia...[/cyan]", console=console):
+        capi = await asyncio.to_thread(vinted_api.leggi_feed)
+
+    if not capi:
+        console.print("[yellow]Nessun capo nel feed. Riprova più tardi.[/yellow]")
+        return
+    console.print(f"[dim]📥 {len(capi)} capi consigliati da Vinted[/dim]")
+
+    # Il feed è misto: le misure target dipendono dal tipo di capo, quindi si raggruppa e si
+    # valuta un gruppo per volta. Quel che non è abbigliamento (il feed serve anche giocattoli,
+    # carte Pokémon, borse) esce subito: qui si cercano capi che vestano.
+    per_tipo: dict[str, list] = {}
+    scartati_non_capi = 0
+    fuori_taglia = 0
+    for capo in capi:
+        tipo = tipo_capo_da_titolo(capo.nome)
+        if tipo == "altro":
+            scartati_non_capi += 1
+            continue
+        # Stesso filtro morbido della ricerca: i capi senza taglia dichiarata passano.
+        taglie = taglie_per_tipo(tipo, profilo)
+        if taglie and not vinted_api.taglia_compatibile(capo.taglia_disponibile, taglie):
+            fuori_taglia += 1
+            continue
+        per_tipo.setdefault(tipo, []).append(capo)
+
+    righe = []
+    if scartati_non_capi:
+        righe.append(f"{scartati_non_capi} non abbigliamento")
+    if fuori_taglia:
+        righe.append(f"{fuori_taglia} fuori taglia")
+    if righe:
+        console.print(f"[dim]✂ scartati: {' · '.join(righe)}[/dim]")
+
+    if not per_tipo:
+        console.print(
+            "[yellow]Nel feed non c'è nessun capo della tua taglia.[/yellow] "
+            "Guarda qualche articolo su Vinted e riprova: il feed si adatta."
+        )
+        return
+
+    arricchiti = []
+    for tipo, gruppo in per_tipo.items():
+        params = ParametriRicerca(
+            query="", tipo_capo=tipo, genere=profilo.genere,
+            vestibilita=profilo.vestibilita_preferita or "regular", lunghezza="regular",
+        )
+        target = misure_target(profilo, tipo, params.vestibilita, params.lunghezza)
+        with Status(f"[cyan]Misuro i capi: {tipo} ({len(gruppo)})...[/cyan]", console=console):
+            selezionati, _, report = await seleziona(gruppo, profilo, params)
+        if report.attivo:
+            console.print(
+                f"[dim]  {tipo}: {report.candidati} → {len(selezionati)}"
+                + (f" · ✂ {report.scartati} fuori misura" if report.scartati else "")
+                + f" · 🎯 {descrivi_target(target)}[/dim]"
+            )
+        arricchiti += selezionati
+
+    # I gruppi arrivano già ordinati al loro interno, ma l'ordine va rifatto sull'insieme.
+    arricchiti = ordina_per_fit(arricchiti)
+
+    if not arricchiti:
+        console.print("[yellow]Nessuno dei capi consigliati ti sta bene.[/yellow]")
+        return
+
+    guardaroba = carica_guardaroba().capi
+    with Status("[cyan]Elaboro i pareri...[/cyan]", console=console):
+        arricchiti = await valuta_prodotti(arricchiti, profilo, None, guardaroba)
+
+    _ultima_ricerca = arricchiti
+    _ultima_query = "feed Vinted"
+    stampa_risultati(arricchiti, "i capi che Vinted ti consiglia")
+
+    # Il feed anonimo non rappresenta i gusti dell'utente: impararci sopra scriverebbe
+    # "barbie vintage" nel profilo. Si impara solo da un feed autenticato.
+    if not autenticato:
+        return
+    with Status("[cyan]Imparo i tuoi gusti dal feed...[/cyan]", console=console):
+        stili = await impara_da_feed(capi)
+    if stili:
+        aggiungi_gusti(positivi=stili)
+        console.print(
+            f"[green]🎨 Ho imparato dai tuoi consigli:[/green] {', '.join(stili)}\n"
+            "[dim]Li userò anche nelle ricerche normali.[/dim]"
+        )
+
+
+async def _cmd_parere(argomenti: str) -> None:
+    """/parere <url vinted> | /parere foto <path> [note] | /parere <descrizione a parole>
+
+    Tre modi per far valutare un capo singolo. Il link è il più completo (prezzo, brand,
+    condizioni e descrizione col metro arrivano dalla pagina); la foto e il testo libero
+    servono per un capo visto in negozio o descritto a voce dettando nel terminale.
+    """
+    argomenti = argomenti.strip()
+    if not argomenti:
+        console.print(
+            "[red]Serve qualcosa da valutare.[/red]\n"
+            "  [cyan]/parere https://www.vinted.it/items/...[/cyan]\n"
+            "  [cyan]/parere foto /percorso/giacca.jpg[/cyan]\n"
+            "  [cyan]/parere giacca Timberland XL, spalle 51, lunghezza 74, 30€[/cyan]"
+        )
+        return
+
+    profilo = carica_profilo()
+    prodotto: ProdottoRisultato | None = None
+    immagini_locali: list[tuple[str, str]] = []
+
+    # --- Modo 1: link Vinted ---
+    if argomenti.startswith("http"):
+        with Status("[cyan]Leggo l'annuncio...[/cyan]", console=console):
+            prodotto = await asyncio.to_thread(vinted_api.articolo_da_url, argomenti)
+        if prodotto is None:
+            console.print(
+                "[red]Non riesco a leggere quell'annuncio.[/red] "
+                "Controlla il link, oppure descrivimi il capo a parole con le misure."
+            )
+            return
+        testo_tipo = vinted_api.categoria_da_url_html(prodotto)
+
+    # --- Modo 2: foto locale ---
+    elif argomenti.startswith("foto "):
+        resto = argomenti[len("foto "):].strip()
+        percorso, _, note = resto.partition(" ")
+        try:
+            with Status("[cyan]Guardo la foto...[/cyan]", console=console):
+                descrizione = await descrivi_immagine(percorso)
+                dati, tipo = leggi_immagine(Path(percorso))
+        except FileNotFoundError as e:
+            console.print(f"[red]File non trovato: {e}[/red]")
+            return
+        except (ValueError, OSError) as e:
+            console.print(f"[red]{e}[/red]")
+            return
+        immagini_locali = [(tipo, dati)]
+        testo_note = note.strip()
+        prodotto = ProdottoRisultato(
+            nome=descrizione[:80],
+            url=percorso,
+            sito="foto",
+            descrizione=f"{descrizione}\n{testo_note}".strip(),
+        )
+        testo_tipo = f"{descrizione} {testo_note}"
+
+    # --- Modo 3: descrizione a parole ---
+    else:
+        prodotto = ProdottoRisultato(
+            nome=argomenti[:80], url="", sito="descrizione", descrizione=argomenti,
+        )
+        testo_tipo = argomenti
+
+    tipo_capo = tipo_capo_da_titolo(testo_tipo)
+    target = misure_target(
+        profilo, tipo_capo, profilo.vestibilita_preferita or "regular", "regular"
+    )
+
+    # Misure dal testo dell'annuncio (titolo + descrizione), validate contro il testo stesso.
+    # Le foto delle inserzioni non si leggono più: le misure lette col metro in fotografia
+    # erano inaffidabili e falsavano il giudizio. La vision resta solo per una foto tua,
+    # dove non c'è nessun testo da leggere.
+    misure = None
+    with Status("[cyan]Cerco le misure...[/cyan]", console=console):
+        dato = (await estrai_da_descrizioni([prodotto]) or {}).get(1)
+        misure = dato[0] if isinstance(dato, tuple) else dato
+        if immagini_locali:
+            try:
+                da_foto = await misure_da_immagini(immagini_locali)
+            except Exception:
+                da_foto = None
+            if da_foto is not None:
+                misure = unisci_misure(misure, da_foto)
+
+    esito = valuta(misure, target, tipo_capo) if descrivi_target(target) else None
+
+    guardaroba = carica_guardaroba().capi
+    with Status("[cyan]Mi faccio un'opinione...[/cyan]", console=console):
+        parere = await parere_su_capo(
+            prodotto, profilo, tipo_capo, target, misure, esito, guardaroba
+        )
+
+    if parere is None:
+        console.print("[red]Non sono riuscito a formulare un parere. Riprova.[/red]")
+        return
+    stampa_parere(prodotto, parere, esito, target)
 
 
 async def _cmd_foto(argomenti: str) -> None:
@@ -176,34 +465,20 @@ async def _cmd_foto(argomenti: str) -> None:
         await _cmd_ricerca(query)
 
 
-def _cmd_salva(argomenti: str) -> None:
-    global _ultima_ricerca, _ultima_query
+def _numerati() -> list[ProdottoArricchito]:
+    """Mostrati e coda in un unico spazio di indici, nell'ordine in cui appaiono a schermo.
 
-    if not _ultima_ricerca:
-        console.print("[yellow]Nessuna ricerca attiva. Esegui prima una ricerca.[/yellow]")
-        return
-
-    try:
-        n = int(argomenti.strip())
-    except ValueError:
-        console.print("[red]Specifica il numero del prodotto: /salva 3[/red]")
-        return
-
-    if n < 1 or n > len(_ultima_ricerca):
-        console.print(f"[red]Numero non valido. Scegli tra 1 e {len(_ultima_ricerca)}.[/red]")
-        return
-
-    prodotto = _ultima_ricerca[n - 1].prodotto
-    aggiungi_preferito(prodotto, _ultima_query)
-    console.print(
-        f"[green]✅ Salvato nei preferiti:[/green] {prodotto.nome} "
-        f"(€{prodotto.prezzo:.0f})" if prodotto.prezzo else f"[green]✅ Salvato nei preferiti:[/green] {prodotto.nome}"
-    )
+    La coda continua la numerazione della tabella principale invece di ripartire da 1: con
+    due numerazioni separate "/link 3" era ambiguo e risolveva sempre sui mostrati, quindi
+    dei capi in coda non si riusciva a tirare fuori l'URL.
+    """
+    return _ultima_ricerca + _ultima_coda
 
 
-def _prodotto_da_indice(argomenti: str):
-    """Ritorna il ProdottoRisultato all'indice N dall'ultima ricerca, o None con messaggio d'errore."""
-    if not _ultima_ricerca:
+def _arricchito_da_indice(argomenti: str) -> ProdottoArricchito | None:
+    """Il capo N dell'ultima ricerca (coda inclusa), o None con messaggio d'errore."""
+    tutti = _numerati()
+    if not tutti:
         console.print("[yellow]Nessuna ricerca attiva. Esegui prima una ricerca.[/yellow]")
         return None
     try:
@@ -211,10 +486,24 @@ def _prodotto_da_indice(argomenti: str):
     except ValueError:
         console.print("[red]Specifica il numero del prodotto (es. 3)[/red]")
         return None
-    if n < 1 or n > len(_ultima_ricerca):
-        console.print(f"[red]Numero non valido. Scegli tra 1 e {len(_ultima_ricerca)}.[/red]")
+    if n < 1 or n > len(tutti):
+        console.print(f"[red]Numero non valido. Scegli tra 1 e {len(tutti)}.[/red]")
         return None
-    return _ultima_ricerca[n - 1].prodotto
+    return tutti[n - 1]
+
+
+def _prodotto_da_indice(argomenti: str) -> ProdottoRisultato | None:
+    pa = _arricchito_da_indice(argomenti)
+    return pa.prodotto if pa is not None else None
+
+
+def _cmd_salva(argomenti: str) -> None:
+    prodotto = _prodotto_da_indice(argomenti)
+    if prodotto is None:
+        return
+    aggiungi_preferito(prodotto, _ultima_query)
+    prezzo = f" (€{prodotto.prezzo:.0f})" if prodotto.prezzo else ""
+    console.print(f"[green]✅ Salvato nei preferiti:[/green] {prodotto.nome}{prezzo}")
 
 
 def _cmd_link(argomenti: str) -> None:
@@ -447,23 +736,9 @@ async def _cmd_stile_intervista() -> None:
 
 
 async def _cmd_carrello(argomenti: str) -> None:
-    global _ultima_ricerca
-
-    if not _ultima_ricerca:
-        console.print("[yellow]Nessuna ricerca attiva. Esegui prima una ricerca.[/yellow]")
+    pa = _arricchito_da_indice(argomenti)
+    if pa is None:
         return
-
-    try:
-        n = int(argomenti.strip())
-    except ValueError:
-        console.print("[red]Specifica il numero del prodotto: /carrello 3[/red]")
-        return
-
-    if n < 1 or n > len(_ultima_ricerca):
-        console.print(f"[red]Numero non valido. Scegli tra 1 e {len(_ultima_ricerca)}.[/red]")
-        return
-
-    pa = _ultima_ricerca[n - 1]
     p = pa.prodotto
     prezzo_str = f" (€{p.prezzo:.0f})" if p.prezzo else ""
     sito_str = p.sito.capitalize()
@@ -508,6 +783,16 @@ async def _cmd_carrello(argomenti: str) -> None:
     )
 
 
+def _cmd_coda() -> None:
+    """Mostra i capi senza misure dichiarate dalla ricerca più recente."""
+    if not _ultima_coda:
+        console.print("[dim]Nessun capo in coda. Esegui prima una ricerca.[/dim]")
+        return
+    # La numerazione riprende da dove finisce la tabella principale: un solo spazio di
+    # indici per /link, /salva, /carrello e /mipiace (vedi _numerati).
+    stampa_coda(_ultima_coda, _ultima_query, offset=len(_ultima_ricerca))
+
+
 def _cmd_profilo_modifica() -> None:
     profilo = carica_profilo()
     console.print("[cyan]Modifica profilo — premi Invio per mantenere il valore attuale.[/cyan]\n")
@@ -543,7 +828,10 @@ def _cmd_profilo_modifica() -> None:
     console.print("\n[underline]Taglie abituali[/underline]")
     t = profilo.taglie
     t.top = Prompt.ask("  Taglia top/maglia (es. M, L, XL)", default=t.top or "") or None
-    t.pantaloni = Prompt.ask("  Taglia pantaloni (es. 32, 34)", default=t.pantaloni or "") or None
+    # La lunghezza va scritta: senza la L un W32 L30 passa come un W32 L36 (15cm di gamba).
+    t.pantaloni = Prompt.ask(
+        "  Taglia pantaloni (es. W32 L36)", default=t.pantaloni or ""
+    ) or None
     t.scarpe = Prompt.ask("  Numero scarpe", default=t.scarpe or "") or None
 
     # Stile e budget
@@ -661,6 +949,15 @@ async def avvia() -> None:
         elif testo == "/proponi":
             await _cmd_proponi()
 
+        elif testo == "/login":
+            await _cmd_login()
+
+        elif testo == "/feed":
+            await _cmd_feed()
+
+        elif testo == "/parere" or testo.startswith("/parere "):
+            await _cmd_parere(testo[len("/parere"):].strip())
+
         elif testo == "/guardaroba" or testo.startswith("/guardaroba "):
             await _cmd_guardaroba(testo[len("/guardaroba"):].strip())
 
@@ -674,6 +971,9 @@ async def avvia() -> None:
 
         elif testo == "/carrello" or testo.startswith("/carrello "):
             await _cmd_carrello(testo[len("/carrello"):].strip())
+
+        elif testo == "/coda":
+            _cmd_coda()
 
         elif testo == "/foto" or testo.startswith("/foto "):
             await _cmd_foto(testo[len("/foto"):].strip())

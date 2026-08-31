@@ -581,6 +581,423 @@ Tutti i capi mostrati dichiarano le misure, contro i 3 su 12 della tornata prece
 gli scarti regular anche quando l'utente preferirebbe aderente. Si controlla con `/profilo`
 e si corregge con `/profilo modifica`.
 
+## Quarta tornata: il feed Vinted come fonte del gusto (2026-08-03)
+
+Tre tornate a costruire un vocabolario di gusto da parole chiave hanno dato risultati
+mediocri. L'osservazione dell'utente ribalta il problema: il recommender di Vinted è
+addestrato sul suo comportamento reale (cosa guarda, cosa salva), quindi sul gusto batte
+qualunque vocabolario scritto a mano. Al programma resta ciò che sa fare bene: i centimetri.
+
+### Come si legge il feed
+
+La homepage Vinted è renderizzata lato server: i capi del feed arrivano come oggetti JSON
+completi dentro i payload `self.__next_f.push([1,"…"])`. Sono stringhe JS, quindi
+`json.loads` sulla stringa le de-escapa in JSON leggibile; poi si ritagliano le entity
+`"type":"item","entity":{…}` bilanciando le graffe — non basta cercare la prima `}`, i
+titoli dei venditori ne contengono.
+
+Ogni entity porta id, titolo, url, prezzo, miniatura e `itemBox.secondLine`
+(`"M / IT 42 / EU 38 · Ottime"` = taglia · condizione). Il brand non c'è: resta `None`.
+
+### Il limite: 20 capi, non paginabili
+
+Il feed vero è paginato via `nextPageToken`. L'endpoint è
+`/web/gateway/homepage/homepage` — trovato leggendo i bundle JS, dove
+`getHomepageTab` lo chiama con `next_page_token`, `homepage_session_id`, `column_count`,
+`version: 4`, `vertical`. Risponde `{"code":"BAD_REQUEST"}` con qualunque combinazione
+provata di parametri e header: vuole un'autenticazione del gateway che non vale la pena
+indovinare a tentoni.
+
+Verificato inoltre che il feed **non ruota**: stessi 20 capi ricaricando la homepage e
+anche rinnovando la sessione. Quindi 20 capi per fetch è il tetto. La pagina catalogo
+(`/catalog/5-uomo`) ne renderebbe 96 per pagina e pagina bene, ma è personalizzata molto
+più debolmente — usarla riporterebbe la spazzatura da cui si voleva scappare.
+
+Dei 20, circa un terzo dichiara le misure, meno i fuori misura: **2-4 risultati per giro**.
+Pochi ma con il gusto scelto da Vinted.
+
+### Login: l'utente accede da sé
+
+`browser/vinted.apri_login()` apre una finestra Chromium headful sul profilo persistente
+(`BROWSER_DATA_DIR / "vinted"`, lo stesso di `/carrello`) e attende. **Nessuna credenziale
+viene chiesta, letta o salvata dal programma**: l'utente accede a mano, Chromium scrive i
+cookie di sessione su disco, e `vinted_api._cookie_da_browser` li trapianta nella sessione
+curl_cffi. È il meccanismo che già esisteva per `/carrello`, qui riusato.
+
+Playwright sincrono non può girare dentro l'event loop asyncio, quindi `/login` chiama
+`apri_login` via `asyncio.to_thread`. Serve il binario del browser:
+`uv run playwright install chromium`.
+
+`sessione_autenticata()` interroga `/api/v2/users/current` (403 da anonimo, 200 da loggato)
+solo per dare messaggi utili.
+
+### Due usi del feed
+
+**Filtrare.** `/feed` classifica ogni capo con `tipo_capo_da_titolo` (deterministica: il
+feed non nasce da una richiesta, e una chiamata LLM per capo sarebbe sproporzionata),
+raggruppa per tipo, e passa ogni gruppo alla pipeline delle misure già esistente. Le misure
+target dipendono dal tipo, quindi il raggruppamento è necessario.
+
+Quel che non è abbigliamento viene scartato subito: il feed serve anche giocattoli, carte
+Pokémon e borse. Si applica anche il filtro morbido sulle taglie, che nel percorso di
+ricerca c'era già ma qui mancava.
+
+**Imparare.** `profilo/gusti.impara_da_feed` ricava dai titoli 3-6 termini di stile
+ricorrenti, che finiscono in `gusti_positivi` e quindi nel vocabolario di affinità e nella
+scelta del termine di stile delle ricerche normali. Il recommender di Vinted diventa il
+maestro del gusto, non solo una fonte di capi.
+
+**Guardia obbligatoria**: da sessione anonima il feed NON è personalizzato — verificato, mostra
+Barbie, gonne leopardate e carte Pokémon. Imparare da lì scriverebbe "barbie vintage" nel
+profilo dell'utente. `/feed` impara **solo** se `sessione_autenticata()`.
+
+### Un bug preesistente nel filtro taglie
+
+Il feed ha esposto una falla in `taglia_compatibile`, che c'era da prima e valeva anche per
+le ricerche: confrontando token numerici nudi,
+`taglia_compatibile("S / IT 40 / EU 36", ["w32 l36"])` dava `True`, perché il 36 della
+taglia EU donna coincide col 36 della lunghezza gamba dell'utente. Passavano gonne da donna
+in taglia S.
+
+Regola aggiunta: se **entrambi** i lati dichiarano una taglia alfabetica, quelle devono
+coincidere. Numeri di sistemi di taglie diversi non sono confrontabili. E `_TAGLIE_ALPHA`
+è stata completata: mancava `xxs`, quindi per un capo "XXS / IT 36" la regola non scattava
+nemmeno.
+
+### Stato della verifica
+
+Verificato anonimamente: parser del feed (20 entity complete), classificazione dal titolo,
+filtro taglie, scarto dei non-abbigliamento, ordinamento sull'insieme dei gruppi, rifiuto
+di imparare da feed anonimo, profilo browser persistente creato e leggibile.
+
+**Non verificabile senza login**: che il feed autenticato sia effettivamente personalizzato
+e produca risultati di gusto. Richiede che l'utente esegua `/login`.
+
+## Quinta tornata: il blocco DataDome al login (2026-08-03)
+
+Il primo `/login` reale è stato bloccato: *"La tua sessione è stata bloccata — abbiamo
+notato attività insolite o automatizzate collegate al tuo indirizzo IP"*.
+
+### Diagnosi: non è l'IP
+
+Verificato subito dopo il blocco: la sessione `curl_cffi` continua a funzionare (homepage
+200 con le 20 entity del feed, `catalog/items` restituisce risultati). Una richiesta senza
+`impersonate` prende 403, come sempre. Quindi **l'IP non è bandito**: è il browser
+automatizzato che è stato riconosciuto.
+
+Nota metodologica: cercare "datadome" o "attività insolite" nel corpo della homepage dà un
+falso positivo — quelle stringhe stanno nel bundle di traduzioni della pagina normale. Per
+sapere se si è bloccati va guardato l'esito dell'API, non il testo della pagina.
+
+### Il browser: Chrome vero invece del Chromium incluso
+
+Il Chromium di Playwright espone segnali di automazione evidenti. `apri_login` ora prova in
+ordine `channel="chrome"`, `"msedge"` e solo per ultimo il Chromium incluso, con
+`--disable-blink-features=AutomationControlled`, `ignore_default_args=["--enable-automation"]`
+e `viewport=None` (finestra reale invece del 800x600 tipico dell'automazione).
+
+### La causa più probabile: il nostro volume di traffico
+
+`_descrizione_da_pagina` scaricava la pagina prodotto **intera** (~2MB) per leggere un meta
+tag che sta nell'`<head>`. Una ricerca ne apre 60: **~120MB per ricerca**. È quel volume,
+più le decine di fetch della fase di esplorazione degli endpoint, la spiegazione più
+plausibile dell'"attività insolita".
+
+Ora la pagina si legge in streaming e la connessione si chiude appena il meta tag è passato:
+16KB invece di 1,9MB. Misurato su 12 capi: **23,4MB → 8MB per ricerca, −66%**.
+
+Il ripiego sulla lettura intera non è una precauzione teorica, serve in due casi reali:
+
+1. Su alcune pagine il meta tag compare **oltre 1,8 milioni di caratteri** — Next.js emette
+   parte dell'`<head>` molto tardi nello stream.
+2. Interrompere uno stream lascia la connessione sporca: **la terza richiesta interrotta di
+   fila sulla stessa sessione restituisce un corpo inutilizzabile** (riprodotto: 112KB letti
+   senza mai trovare il marcatore). Una lettura completa ripulisce lo stato.
+
+Senza il ripiego la copertura scendeva a 3 su 6 capi: una regressione silenziosa proprio sul
+dato che regge tutta la feature. Con il ripiego, 12 su 12.
+
+`Range: bytes=0-N` è stato provato e **non serve**: il server lo ignora e manda tutto.
+
+### Il self-check giusto
+
+Il primo tentativo — "quasi tutti i capi devono avere una descrizione" — falliva legittimamente:
+diversi venditori non scrivono nulla, e un meta tag vuoto non è una perdita. L'invariante
+corretto confronta i due percorsi sullo stesso capo: **lo streaming non deve perdere ciò che
+la lettura intera contiene**. Zero perse su 6.
+
+## Sesta tornata: usare la sessione Chrome già aperta (2026-08-03)
+
+Domanda dell'utente: se sono già loggato su Vinted nel mio Chrome, perché devo riaccedere?
+Risposta: non deve. E leggere i cookie dal suo Chrome è **meglio** del login con finestra,
+perché non lancia nessun browser automatizzato — DataDome non ha niente da riconoscere.
+
+### Fattibilità, verificata
+
+Il profilo `Default` di Chrome contiene 40 cookie di vinted.it, fra cui
+`access_token_web` e `refresh_token_web`. Tutti in schema **`v10`** (3709 cookie su 3709):
+AES-128-CBC con chiave derivata dal Keychain. Non `v20` (App-Bound Encryption), che sarebbe
+stato impossibile da leggere dall'esterno. `cryptography` era già nel venv.
+
+### `browser/cookie_chrome.py`
+
+Chiave: PBKDF2-HMAC-SHA1 della password "Chrome Safe Storage" del Keychain, salt
+`b"saltysalt"`, 1003 iterazioni, 16 byte. Valore: prefisso `v10` + AES-128-CBC con IV di 16
+spazi, padding PKCS7. Le versioni recenti premettono al testo in chiaro l'hash SHA-256 del
+dominio: se il risultato non è stampabile si riprova saltando 32 byte.
+
+Limiti deliberati del modulo:
+
+- interroga **solo** le righe di vinted.it, e di quelle **solo** i due token di sessione;
+- non legge, copia o registra nessun altro cookie né altro dato di Chrome;
+- non tocca password — i token di sessione non permettono di ricavarla;
+- non stampa mai i valori, nemmeno nel self-check (che verifica lunghezza e forma JWT);
+- copia il database prima di leggerlo, perché Chrome lo tiene aperto.
+
+I token si tengono in cache per la durata del processo: ogni lettura fa comparire il dialogo
+del Keychain, e `_warm()` viene richiamata a ogni 403.
+
+`_warm()` prende l'autenticazione da Chrome se c'è; il profilo browser persistente di
+`/login` resta come ripiego per chi non usa Chrome. `/login` prova Chrome per primo e
+apre la finestra solo se lì non trova una sessione valida.
+
+### Esito: il feed è personalizzato
+
+Autenticato (`/api/v2/users/current` → 200). Il feed cambia completamente:
+
+```
+anonimo:      Barbie silkstone · gonna leopardata S · carte Pokémon · braccialetti
+autenticato:  T-Shirt Diesel XL · Levi's · Champion · HUF · Dickies Henley vintage
+              New York Mets raglan MLB · Guinness tee · Brooks
+```
+
+25 capi invece di 20, tutti taglie L/XL da uomo.
+
+### Il limite che resta, ed è strutturale
+
+Su 25 capi del feed, **1 o 2 dichiarano le misure**. Sono venditori occasionali, non i
+negozi vintage curati che le scrivono. Il feed dà quindi gusto eccellente e misure quasi
+nulle: l'esatto opposto della ricerca spinta sulle misure.
+
+Correzione collegata: l'entity del feed porta solo `thumbnailUrl`, una foto. Il fallback
+vision riceveva la sola copertina, mentre il metro a nastro sta nelle foto successive. Le
+URL full-size stanno nella stessa zona iniziale della pagina del meta tag (entro ~7KB),
+quindi ora si raccolgono nella stessa lettura in streaming, a costo zero — 2-7 foto per capo.
+Anche così, nel feed reale la vision non ha trovato misure leggibili: quei venditori non
+fotografano il metro.
+
+### Il ponte fra i due mondi: l'apprendimento
+
+È la metà che funziona davvero. Dai 25 titoli del feed autenticato:
+
+```
+vintage band tee · sportswear classico · heritage brand · graphic tee
+streetwear 90s · Levi's denim · single stitch
+```
+
+Il vocabolario di affinità passa da 5 nomi di stile a 21 termini. Verificato sulla ricerca
+normale subito dopo: primo risultato *"Official NYC Top of the Rock Graphic T-Shirt — Faded
+Black, American Vintage"*, `SU MISURA spalle 51 ✓`, giudizio "vintage Y2K band tee esatto".
+Misure garantite dalla ricerca, gusto imparato dal feed.
+
+Nota di progetto: molti termini imparati (`band`, `tee`, `graphic`, `streetwear`, `denim`)
+stanno in `_GUSTO_TROPPO_COMUNE`, quindi arricchiscono l'affinità ma non vengono scelti come
+termine di ricerca. È corretto: discriminano dentro un titolo, non dentro una ricerca Vinted.
+
+### Un ultimo errore di 8cm
+
+L'esecuzione di verifica ha smascherato un bug che nessun test copriva: su *"maglietta
+t-shirt a maniche corte"* il modello restituiva `lunghezza: "corta"`, confondendo la
+lunghezza della **manica** con quella del **capo**. Il target scendeva a 64cm invece di 72,
+su una richiesta che non chiedeva nessun crop.
+
+`_lunghezza_richiesta` toglie dal testo le locuzioni "manica/maniche corta/lunga" e solo poi
+cerca indicazioni di lunghezza. Il guardiano gemello per la vestibilità esisteva già; questo
+mancava.
+
+Nel farlo è emerso che entrambe le regex scrivevano `lungh[aeio]`, che in italiano non
+matcha né "lungo" né "lunga" (l'h c'è solo in "lunghi/lunghe"). La svista era **simmetrica**,
+quindi il test su "manica lunga" passava per caso e non per funzionamento: le forme corrette
+sono ora in un'unica costante condivisa, `_FORME_LUNGHEZZA`.
+
+## Settima tornata: precisione onesta sulle misure (2026-08-04)
+
+Il modello a media pesata mentiva. Caso reale trovato in lista:
+
+```
+Maglietta Hard Rock Amsterdam   🎯 SU MISURA   lungh 70 ✓ · spalle 52 ✓ · petto 60 (+9, molto largo)
+```
+
+Due difetti distinti, entrambi strutturali:
+
+1. **Il petto non poteva scartare.** Aveva peso 1 e la regola di scarto guardava solo le
+   misure di peso 3. Un errore di 9cm passava indenne.
+2. **La fascia veniva dedotta da una media.** `(3 + 3 + 0) / 7 = 0.857`, sopra la soglia di
+   0.85: le due misure giuste compensavano quella sbagliata. E un capo che dichiarava **una
+   sola** misura su tre poteva prendere "su misura" pur essendo in gran parte ignoto.
+
+### Misurato prima di scegliere
+
+Su 60 candidati reali (di cui ~18 con qualche misura dichiarata):
+
+| regola | certi | incerti | esclusi |
+|---|---|---|---|
+| attuale (media pesata) | 2 | 2 | 14 |
+| tutte le misure a 4cm, tutte obbligatorie | **0** | 1 | 17 |
+| prioritarie 4cm, petto 8cm, petto opzionale | **3** | 0 | 15 |
+| prioritarie 4cm, petto 8cm, petto obbligatorio | 2 | 1 | 15 |
+
+La severità uniforme dà **liste vuote**: le tolleranze devono restare differenziate, come da
+richiesta originale ("prediligi lunghezza e ampiezza, meno il torace"). La differenza è che
+ora anche il petto esclude, con una banda più larga — non ha più l'immunità.
+
+### Tre classi esplicite invece di una media
+
+`EsitoFit.classe` sostituisce la fascia dedotta dal punteggio:
+
+- **0 · su misura** — tutte le misure prioritarie dichiarate e dentro tolleranza
+- **1 · misure parziali** — quel che dichiara è giusto, ma manca una prioritaria
+- **2 · non dichiarate** — il venditore non ha scritto nulla
+
+**Scartato** (non compare affatto) se una qualsiasi misura dichiarata sfora la propria
+tolleranza: `SCARTO_MAX_CM = 4` per lunghezza e spalle, `SCARTO_MAX_SECONDARIO_CM = 8` per il
+petto. Se il venditore l'ha scritta e non va bene, non c'è niente da interpretare.
+
+Il `punteggio` resta ma degrada a spareggio: l'ordine è
+`(classe, −affinità di gusto, −punteggio, rilevanza)`. Quindi la vestibilità decide, il gusto
+rompe i pari, e a pari gusto vince chi è più preciso sui centimetri.
+
+Il separatore in tabella scatta ora al primo capo **non** su misura, non al primo senza
+misure: sia le parziali sia le assenti sono "potrebbe starti", e vanno distinte dalle certe.
+
+### Due correzioni collegate
+
+**La vision tenta anche sui parziali.** Prima leggeva le foto solo dei capi senza nessuna
+misura; ora anche di quelli parziali, perché una misura letta dalle foto può completarli e
+promuoverli a certi. Le misure si **uniscono** invece di sovrascriversi (`_unisci`): una
+misura scritta dal venditore è più affidabile di un numero letto in una fotografia, quindi
+se c'è già resta quella, e le foto colmano solo i buchi.
+
+**Il consulente non ri-giudica i centimetri.** Con le etichette corrette è emersa
+un'incoerenza nella stessa riga di tabella: fit `🎯 SU MISURA`, parere `❌ EVITA — spalle
+troppo strette (-4cm)`. Il verdetto sulle misure è già stato preso in modo deterministico e i
+capi fuori tolleranza non arrivano nemmeno al modello, quindi il prompt ora dichiara le
+tolleranze accettate e vieta di bocciare un capo per uno scarto che la riga fit riporta come
+accettabile. Il giudizio del consulente resta su prezzo, condizioni, stile e abbinamenti.
+
+Verificato dopo la modifica: gli stessi capi passano da `EVITA — spalle troppo strette` a
+`COMPRA — graphic tee perfetto, spalle un po' strette ma accettabili`.
+
+### Esito
+
+```
+🎯 Misure cercate (top): spalle ~52cm · petto ~51cm · lungh ~72cm
+60 candidati · ✂ 24 scartati fuori misura · 📷 1 misure lette dalle foto
+
+1  The Simpsons Homer Graphic Tee  €10  ✅ COMPRA   🎯 SU MISURA  lungh 70 ✓ · spalle 48 (−4) · petto 54 (+3)
+2  T-Shirt Pull & Bear             €5   ✅ COMPRA   🎯 SU MISURA  lungh 72 ✓ · spalle 52 ✓ · petto n/d
+```
+
+Nota di progetto: dentro la stessa classe il gusto viene prima della precisione, quindi il
+capo con affinità più alta può precedere quello più preciso al centimetro. È coerente con
+"prima la vestibilità, poi il gusto" — la classe è la vestibilità, e dentro la classe gli
+scarti sono già tutti accettabili. Invertire i due criteri è una riga in `_chiave_ordine`.
+
+## Ottava tornata: `/parere` su un capo singolo (2026-08-04)
+
+Nuova funzione: si sottopone **un** capo e si ottiene un verdetto argomentato — comprarlo o
+no, perché, e cosa chiedere al venditore. Tre modi di input:
+
+| modo | comando | dati disponibili |
+|---|---|---|
+| link Vinted | `/parere https://...` | nome, brand, prezzo, condizioni, descrizione, foto |
+| fotografia | `/parere foto <path> [note]` | descrizione dedotta dall'immagine, misure se leggibili |
+| a parole | `/parere giacca Timberland XL, spalle 51...` | quel che l'utente scrive o detta |
+
+Il terzo modo copre anche la descrizione "a voce": si detta nel terminale. Il programma non
+registra audio, e non serve.
+
+### Il link: JSON-LD, non le classi CSS
+
+`vinted_api.articolo_da_url` legge la pagina intera (~2MB: per un capo solo è irrilevante) e
+prende i dati dal blocco `<script type="application/ld+json">` schema.org, che espone nome,
+descrizione completa con le misure, brand, prezzo, categoria e colore. Le stesse informazioni
+nel DOM stanno dentro classi tipo `web_ui__Text__subtitle`, che cambiano a ogni rilascio del
+sito: il JSON-LD è la fonte stabile. La taglia non è esposta lì, ma il venditore la scrive
+quasi sempre nella descrizione, che il consulente legge comunque.
+
+La categoria Vinted (`"Uomo Soprabiti e cappotti lunghi"`) classifica il capo meglio del solo
+titolo e viene accodata alla descrizione per `tipo_capo_da_titolo`.
+
+### Un bug grave scoperto dal caso reale
+
+Sul cappotto Timberland dell'esempio, che dichiara **solo** spalle 51 e lunghezza 74,
+l'estrattore ha restituito anche `petto_flat_cm: 37` — un numero che nella descrizione non
+esiste. Con la regola introdotta nella settima tornata (ogni misura dichiarata fuori
+tolleranza esclude il capo), quell'allucinazione **faceva scartare un capo buono in silenzio**.
+
+`_numero_nel_testo` verifica ora che ogni numero estratto compaia davvero nel testo di
+origine, con confini di cifra (`51` non si trova dentro `151`). Il controllo si applica al
+valore grezzo prima della normalizzazione, perché una circonferenza di 102 dimezzata a 51 non
+comparirebbe come "51". Sulle letture da foto non si applica: non c'è testo con cui
+confrontare.
+
+Non è una precauzione teorica: senza di essa il cappotto risultava `scartato`; con essa
+risulta su misura.
+
+### Capispalla: categoria propria
+
+Una giacca si porta sopra altri capi, e la sua lunghezza dipende dal modello. `tipo_capo` ha
+quindi un quarto valore, `capospalla`, con:
+
+- `EASE_CAPOSPALLA_SPALLE = 2` e `EASE_CAPOSPALLA_PETTO = 5` di margine per gli strati sotto;
+- **nessun target di lunghezza** — un bomber da 68cm e un trench da 95cm sono entrambi
+  corretti, e un target unico li boccerebbe entrambi;
+- `PESI = {spalle_cm: 3, petto_flat_cm: 1}`: le spalle sono la misura decisiva.
+
+`tipo_capo_da_titolo` controlla i capispalla **per primi**, perché il tessuto non fa il capo:
+"giacca di jeans" è un capospalla, non un pantalone. La camicia resta un top anche se di denim.
+
+Sul cappotto dell'esempio il target passa da `spalle ~52` a `spalle ~54`: 51cm risulta −3
+(dentro tolleranza) invece di −1 (quasi perfetto). È la differenza fra "giusto" e "stretto
+sopra un maglione".
+
+### Il parere
+
+`valutazione/parere.py` produce `ParereCapo`: verdetto, sintesi, `a_favore`, `contro`,
+`da_chiedere`. Il confronto sulle misure resta deterministico e viene **passato come dato** al
+modello, con le tolleranze accettate esplicitate e il divieto di ri-giudicare i centimetri —
+la stessa correzione della settima tornata, qui applicata al parere singolo. Un capo
+`scartato` non può uscire con verdetto "compra": il verdetto viene forzato a "evita" in
+Python, perché il giudizio sui centimetri non si lascia ribaltare dal modello.
+
+Esito sul cappotto reale: `🤔 DIPENDE — cappotto heritage a prezzo ottimo, ma la larghezza
+spalle è 3cm sotto target. Chiedi il petto prima di decidere`, con quattro punti a favore
+(prezzo, colore compatibile con la palette, brand heritage, lunghezza proporzionata ai 194cm),
+tre contro e due domande da fare al venditore.
+
+### Un classificatore, non due
+
+Introdurre `capospalla` ha rotto la coerenza fra i percorsi: la ricerca usava il `tipo_capo`
+dedotto dall'LLM (che conosceva solo top/pantaloni/scarpe/altro), mentre feed e `/parere`
+usavano `tipo_capo_da_titolo`. La stessa "giacca di jeans" veniva quindi giudicata come **top**
+se cercata — con un target di lunghezza che per una giacca non significa niente — e come
+**capospalla** se sottoposta col link.
+
+Ora il classificatore deterministico ha l'ultima parola quando riconosce il capo, e l'LLM
+decide solo nei casi che quello marca "altro". Un solo criterio per tutti e tre i percorsi.
+Aggiunta anche la voce `capospalla` a `_PAROLE_MISURE`: senza, la ricerca ricadeva su "misure"
+da sola, che seleziona il 10% dei capi con misure dichiarate contro il 65% del vocabolario
+completo.
+
+### Limite noto
+
+Per i capispalla la sola misura prioritaria è le spalle, quindi `SU MISURA` si raggiunge con
+**una** misura dichiarata — evidenza più sottile che per un top, che ne richiede due. È
+coerente con la scelta "le spalle decidono", e la riga di dettaglio mostra `petto n/d`, ma chi
+volesse più severità deve portare `petto_flat_cm` a peso 3 per i capispalla, accettando che la
+sua tolleranza scenda da 8 a 4cm.
+
 ## Fuori scopo
 
 - Zara e Zalando: non espongono le misure del singolo capo, restano sul filtro taglia.

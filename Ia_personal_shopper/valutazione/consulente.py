@@ -123,15 +123,28 @@ def _costruisci_prompt_utente(
 
     sezione_target = ""
     if target is not None:
-        from Ia_personal_shopper.valutazione.fit import descrivi_target
+        from Ia_personal_shopper.valutazione.fit import (
+            SCARTO_MAX_CM,
+            SCARTO_MAX_SECONDARIO_CM,
+            descrivi_target,
+        )
         descrizione_target = descrivi_target(target)
         if descrizione_target:
+            # Il verdetto sulle misure è già stato preso in modo deterministico: i capi fuori
+            # tolleranza non sono nemmeno in questa lista. Senza dirlo, il modello ri-giudicava
+            # i centimetri e bocciava capi che la riga fit dichiarava a misura — due messaggi
+            # contraddittori nella stessa riga di tabella.
             sezione_target = (
                 f"\nMISURE CERCATE PER QUESTO CAPO: {descrizione_target}\n"
-                "Il campo \"fit\" di ogni prodotto è già il confronto tra le misure dichiarate "
-                "dal venditore e queste: fidati di quel dato invece di ricalcolarlo dalla "
-                "descrizione. \"misure non dichiarate\" significa che il venditore non le ha "
-                "scritte, quindi il capo potrebbe andare bene o no: dillo nel commento.\n"
+                f"Il campo \"fit\" è già il confronto fatto: i capi fuori tolleranza sono stati "
+                f"esclusi prima di arrivare a te. Tolleranze accettate dall'utente: fino a "
+                f"{SCARTO_MAX_CM:.0f}cm su lunghezza e spalle, fino a "
+                f"{SCARTO_MAX_SECONDARIO_CM:.0f}cm sul petto, che per lui conta meno.\n"
+                "Quindi NON bocciare un capo per uno scarto che il campo \"fit\" riporta: quello "
+                "scarto è già stato giudicato accettabile. Puoi menzionarlo, ma il tuo verdetto "
+                "deve basarsi su prezzo, condizioni, stile e abbinamenti.\n"
+                "\"misure non dichiarate\" significa che il venditore non le ha scritte: il capo "
+                "potrebbe andare bene o no, dillo nel commento e sii più prudente.\n"
             )
 
     return f"""Valuta questi prodotti per l'utente {profilo.nome}:

@@ -33,9 +33,9 @@ _PROMPT = """Sei l'interprete delle ricerche di un personal shopper che cerca ca
 Trasforma la richiesta dell'utente in parametri di ricerca. Rispondi SOLO con JSON:
 {{"query": "...", "tipo_capo": "top|pantaloni|scarpe|altro", "colori": [...],
   "genere": "uomo"|"donna"|null, "vestibilita": "aderente|regular|oversize"|null,
-  "lunghezza": "corta|regular|lunga"|null, "termine_stile": "..."|null}}
+  "lunghezza": "corta|regular|lunga"|null, "termini_stile": ["...", "..."]}}
 
-GUSTI DELL'UTENTE (per termine_stile):
+GUSTI DELL'UTENTE (per termini_stile):
 stili: {stili}
 gli piacciono: {piacciono}
 da evitare: {evitare}
@@ -46,8 +46,9 @@ Regole:
   e le indicazioni di vestibilità o lunghezza (vanno nei campi dedicati: sono filtri sulle
   misure reali del capo, e come parole di ricerca ridurrebbero i risultati).
   MANTIENI i dettagli distintivi del capo (es. "scollo a v", "bootcut", nome modello, brand).
-- tipo_capo: "top" (magliette, camicie, felpe, maglioni, giacche), "pantaloni" (anche jeans e shorts),
-  "scarpe", "altro" (accessori, borse, ecc.).
+- tipo_capo: "top" (magliette, camicie, felpe, maglioni), "capospalla" (giacche, cappotti,
+  bomber, piumini, parka, blazer: tutto ciò che si porta sopra gli altri capi),
+  "pantaloni" (anche jeans e shorts), "scarpe", "altro" (accessori, borse, ecc.).
 - colori: solo valori tra: {colori}. Se il colore richiesto non è in lista, lascialo nella query.
 - genere: solo se esplicito nella richiesta, altrimenti null.
 - vestibilita: quanto deve essere ampio il capo. "aderente" (slim, fit, stretto, attillato),
@@ -55,21 +56,23 @@ Regole:
 - lunghezza: quanto deve essere lungo. "corta" (croppata, crop, corta, sopra il fianco),
   "lunga" (lunga, longline, oltre il fianco). null se la richiesta NON lo dice.
   I due campi sono indipendenti: "oversize croppata" → vestibilita oversize, lunghezza corta.
-- termine_stile: UNA SOLA parola (massimo due) che spinge la ricerca verso i gusti
-  dell'utente elencati sopra. Verrà aggiunta a una fetta minoritaria della ricerca.
-  Deve essere UNA sola perché la ricerca Vinted è un'intersezione: ogni parola di gusto in
-  più fa crollare la quota di capi che dichiarano le misure, e le misure contano più del
-  gusto. Misurato: "misure spalle lunghezza grunge" tiene il 65% di capi con misure,
-  "misure spalle lunghezza band tee" scende al 10%.
-  Scegli un termine DISCRIMINANTE: una sottocultura, una scena o un dettaglio costruttivo
-  ("grunge", "western", "goth", "punk", "workwear", "metal", "single stitch").
-  NON un'epoca: "vintage", "90s", "y2k", "retro" non discriminano niente, su Vinted li
-  scrive metà dei venditori. NON un termine generico e onnipresente come "rock" o "band"
-  da solo: appaiono in troppe inserzioni di massa e diluiscono le misure.
-  Preferisci il termine più specifico tra gli stili dell'utente, tradotto in come lo
-  scrivono i venditori (es. "Modern Western" → "western", "Grunge" → "grunge").
+- termini_stile: da 0 a 3 termini di stile presi dai gusti dell'utente qui sopra. Ognuno
+  diventa una RICERCA A SÉ, quindi non vanno combinati fra loro: servono tre porte
+  d'ingresso diverse allo stesso gusto, non una query più lunga.
+  Ogni termine: UNA sola parola (massimo due). Deve restare corto perché la ricerca Vinted
+  è un'intersezione, e ogni parola in più fa crollare la quota di capi che dichiarano le
+  misure — misurato: "misure spalle lunghezza grunge" tiene il 65%, "misure spalle
+  lunghezza band tee" scende al 10%.
+  Scegli termini DISCRIMINANTI e diversi tra loro: una sottocultura, una scena o un
+  dettaglio costruttivo ("grunge", "western", "goth", "punk", "workwear", "metal",
+  "single stitch").
+  NON epoche: "vintage", "90s", "y2k", "retro" non discriminano niente, su Vinted li
+  scrive metà dei venditori. NON termini generici e onnipresenti come "rock" o "band"
+  da soli: appaiono in troppe inserzioni di massa e diluiscono le misure.
+  Traduci gli stili dell'utente in come li scrivono i venditori (es. "Modern Western" →
+  "western", "Grunge" → "grunge").
   Non usare mai i termini elencati come "da evitare".
-  null se la richiesta è GIÀ specifica (nomina una band, un brand, un modello o un
+  Lista vuota se la richiesta è GIÀ specifica (nomina una band, un brand, un modello o un
   dettaglio preciso), oppure se l'utente non ha stili registrati.
 
 Richiesta: {testo}"""
@@ -111,6 +114,25 @@ _ACCENNO_VESTIBILITA = re.compile(
     r"|comod\w*|ampi[oae]|vestibilit\w*|fit)\b",
     re.IGNORECASE,
 )
+
+
+# "manica corta" / "maniche lunghe" parlano della manica, non della lunghezza del capo. Il
+# modello le confonde: su "t-shirt a maniche corte" restituiva lunghezza "corta", e il target
+# scendeva a 64cm invece di 72 — 8cm di errore su una richiesta che non chiedeva un crop.
+# Concordanze italiane per esteso: "lungo/lunga" non hanno l'h, "lunghi/lunghe" sì. Scrivere
+# lungh[aeio] le mancava tutte e quattro — e la stessa svista in entrambe le regex faceva
+# passare il test su "manica lunga" per caso invece che per funzionamento.
+_FORME_LUNGHEZZA = r"cort[oaie]|lung[oa]|lungh[ie]"
+_MANICHE = re.compile(rf"manich?[ae]\s+(?:{_FORME_LUNGHEZZA})", re.IGNORECASE)
+_ACCENNO_LUNGHEZZA = re.compile(
+    rf"\b(?:cropp\w*|crop|cropped|longline|{_FORME_LUNGHEZZA})\b",
+    re.IGNORECASE,
+)
+
+
+def _lunghezza_richiesta(testo: str) -> bool:
+    """True se la richiesta dice qualcosa sulla lunghezza del CAPO, non della manica."""
+    return bool(_ACCENNO_LUNGHEZZA.search(_MANICHE.sub(" ", testo)))
 
 
 def _vestibilita_richiesta(testo: str) -> bool:
@@ -163,8 +185,8 @@ def _termine_stile_valido(termine: str, stili: set[str]) -> bool:
 
     Senza questo controllo la scelta del modello oscilla tra esecuzioni identiche: una
     volta "grunge", quella dopo "vintage" — che su Vinted non seleziona niente e riporta il
-    mainstream. Il termine finisce in una sola fetta della ricerca, ma quella fetta è
-    l'unico ingresso del gusto, quindi un termine debole la spreca.
+    mainstream. Ogni termine si prende una fetta del budget di ricerca, quindi un termine
+    debole non è neutro: sottrae candidati a quelli buoni.
     """
     token = {t for t in re.findall(r"[\w'-]+", termine.lower())}
     if len(token) > 2 or not token:
@@ -172,6 +194,29 @@ def _termine_stile_valido(termine: str, stili: set[str]) -> bool:
     if token & (EPOCHE_GENERICHE | _GUSTO_TROPPO_COMUNE):
         return False
     return bool(token & (stili | _MARCATORI_STILE))
+
+
+MAX_TERMINI_STILE = 3
+
+
+def filtra_termini_stile(termini: list[str], stili: set[str]) -> list[str]:
+    """I termini validi, deduplicati e troncati a MAX_TERMINI_STILE.
+
+    La deduplica è sui token e non sulla stringa: "band tee" e "tee" pescherebbero quasi
+    lo stesso insieme, e sprecherebbero due delle tre fette di ricerca su un gusto solo.
+    """
+    validi: list[str] = []
+    visti: set[str] = set()
+    for termine in termini:
+        pulito = " ".join((termine or "").lower().split())
+        token = frozenset(re.findall(r"[\w'-]+", pulito))
+        if not _termine_stile_valido(pulito, stili) or token & visti:
+            continue
+        visti |= token
+        validi.append(pulito)
+        if len(validi) == MAX_TERMINI_STILE:
+            break
+    return validi
 
 
 async def interpreta_ricerca(testo: str, profilo: ProfiloUtente) -> ParametriRicerca:
@@ -201,6 +246,12 @@ async def interpreta_ricerca(testo: str, profilo: ProfiloUtente) -> ParametriRic
         params = ParametriRicerca(query=pulisci_query(testo))
 
     params.query = _togli_vestibilita(params.query)
+    # Il classificatore deterministico ha l'ultima parola quando riconosce il capo: senza,
+    # la ricerca usava il tipo dedotto dall'LLM mentre feed e /parere usavano questo, e la
+    # stessa "giacca di jeans" veniva giudicata come top in un caso e capospalla nell'altro.
+    tipo_certo = tipo_capo_da_titolo(f"{testo} {params.query}")
+    if tipo_certo != "altro":
+        params.tipo_capo = tipo_certo
     if params.genere not in ("uomo", "donna"):
         params.genere = None
     params.genere = params.genere or rileva_genere(testo, default=profilo.genere)
@@ -213,13 +264,12 @@ async def interpreta_ricerca(testo: str, profilo: ProfiloUtente) -> ParametriRic
         params.vestibilita = profilo.vestibilita_preferita
     if params.vestibilita not in _VESTIBILITA:
         params.vestibilita = "regular"
-    if params.lunghezza not in _LUNGHEZZE:
+    if params.lunghezza not in _LUNGHEZZE or not _lunghezza_richiesta(testo):
         params.lunghezza = "regular"
     # Un termine di stile debole spreca la fetta di ricerca che gli è riservata: meglio
     # nessuno, e il coordinatore usa tutto il budget per la caccia pura alle misure.
     stili_utente, _ = vocabolari_gusto(profilo)
-    termine = (params.termine_stile or "").strip()
-    params.termine_stile = termine if _termine_stile_valido(termine, stili_utente) else None
+    params.termini_stile = filtra_termini_stile(params.termini_stile, stili_utente)
     return params
 
 
@@ -229,10 +279,51 @@ def color_ids(colori: list[str]) -> str | None:
     return ",".join(ids) or None
 
 
+# Classificazione del capo dal solo titolo, per i capi che non nascono da una richiesta
+# (feed Vinted): serve a scegliere quali misure target confrontare. Deterministica e
+# gratuita — l'alternativa sarebbe una chiamata LLM per ogni capo del feed.
+# I capispalla si portano sopra altri capi, quindi hanno target propri (vedi valutazione/fit):
+# più margine su spalle e petto, e nessun controllo sulla lunghezza — un bomber da 68cm e un
+# trench da 95cm sono entrambi corretti, e un target unico li boccerebbe entrambi.
+_PAROLE_CAPOSPALLA = (
+    "giacc", "cappott", "giubbott", "bomber", "piumino", "parka", "trench", "blazer",
+    "montgomery", "impermeabil", "windbreaker", "k-way", "softshell", "gilet", "smanicato",
+)
+
+_TIPO_DA_PAROLA: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("scarpe", ("scarp", "sneaker", "stival", "scarpon", "mocassin", "sandal", "anfibi",
+                "boots", "ciabatt", "infradito")),
+    ("pantaloni", ("pantalon", "jeans", "short", "bermuda", "chino", "cargo", "legging",
+                   "denim")),
+    ("top", ("t-shirt", "tshirt", "t shirt", "maglietta", "maglion", "maglia", "felpa",
+             "camicia", "camicetta", "polo", "cardigan", "canotta", "hoodie", "sweater",
+             "sweatshirt", "pullover", "tee")),
+)
+
+
+def tipo_capo_da_titolo(titolo: str) -> str:
+    """"capospalla" | "top" | "pantaloni" | "scarpe" | "altro" dal titolo di un'inserzione.
+
+    L'ordine dei controlli conta. I capispalla vengono per primi perché il tessuto non fa il
+    capo: "giacca di jeans" è un capospalla, non un pantalone. La camicia resta un top anche
+    se di denim. Scarpe e pantaloni precedono i top per lo stesso motivo.
+    """
+    t = titolo.lower()
+    if any(p in t for p in _PAROLE_CAPOSPALLA):
+        return "capospalla"
+    if "camicia" in t or "camicetta" in t:
+        return "top"
+    for tipo, parole in _TIPO_DA_PAROLA:
+        if any(p in t for p in parole):
+            return tipo
+    return "altro"
+
+
 def taglie_per_tipo(tipo_capo: str, profilo: ProfiloUtente) -> list[str] | None:
     """La sola taglia del profilo pertinente al tipo di capo ("altro" → nessun filtro taglia)."""
     taglia = {
         "top": profilo.taglie.top,
+        "capospalla": profilo.taglie.top,     # le giacche seguono la taglia dei top
         "pantaloni": profilo.taglie.pantaloni,
         "scarpe": profilo.taglie.scarpe,
     }.get(tipo_capo)
@@ -261,6 +352,16 @@ if __name__ == "__main__":
     assert not _termine_stile_valido("cotone", stili)
     assert not _termine_stile_valido("t-shirt grunge single stitch", stili)
     assert not _termine_stile_valido("", stili)
+
+    # Più termini: ognuno è una ricerca a sé, quindi i doppioni di gusto vanno tolti
+    assert filtra_termini_stile(["Grunge", "vintage", "western"], stili) == ["grunge", "western"]
+    assert filtra_termini_stile(["band tee", "tee", "goth"], stili) == ["goth"]
+    # "single stitch" e "stitch" pescherebbero lo stesso insieme: una fetta sprecata
+    assert filtra_termini_stile(["single stitch", "stitch"], set()) == ["single stitch"]
+    assert filtra_termini_stile(["grunge", "western", "goth", "punk"], stili | {"goth", "punk"}) == [
+        "grunge", "western", "goth",
+    ], "mai più di MAX_TERMINI_STILE fette"
+    assert filtra_termini_stile([], stili) == []
 
     # I termini di sola vestibilità escono dalla query; quelli che descrivono il capo restano
     assert _togli_vestibilita("maglietta manica corta croppata") == "maglietta manica corta"
@@ -293,6 +394,35 @@ if __name__ == "__main__":
     assert not _vestibilita_richiesta("t-shirt nera con stampa")
     assert not _vestibilita_richiesta("camicia a manica lunga")
 
+    # La lunghezza della manica non è la lunghezza del capo: 8cm di target in ballo
+    assert not _lunghezza_richiesta("maglietta t-shirt a maniche corte")
+    assert not _lunghezza_richiesta("camicia a manica lunga")
+    assert not _lunghezza_richiesta("t-shirt nera con stampa")
+    assert _lunghezza_richiesta("maglietta a manica corta un po' croppata")
+    assert _lunghezza_richiesta("t-shirt corta")
+    assert _lunghezza_richiesta("felpa longline")
+    assert _lunghezza_richiesta("maglione lungo")
+    assert _lunghezza_richiesta("maglioni lunghi")
+    assert not _lunghezza_richiesta("camicie a maniche lunghe")
+    assert not _lunghezza_richiesta("polo manica corta")
+    # Il ripiego che rende inutile fidarsi del prompt: la manica non muove il target
+    assert _MANICHE.sub("", "t-shirt a maniche corte").strip() == "t-shirt a"
+
+    # Classificazione dal titolo, per i capi del feed che non nascono da una richiesta
+    assert tipo_capo_da_titolo("T-shirt vintage Nike taglia L") == "top"
+    assert tipo_capo_da_titolo("Maglietta Hard Rock") == "top"
+    assert tipo_capo_da_titolo("Jeans Levi's 501 W32") == "pantaloni"
+    assert tipo_capo_da_titolo("Pantaloncini Bermuda Bershka") == "pantaloni"
+    assert tipo_capo_da_titolo("Sneakers Nike Air Max 47") == "scarpe"
+    assert tipo_capo_da_titolo("Barbie vintage silkstone") == "altro"
+    # Il tessuto non fa il capo: una giacca di jeans è un capospalla, non un pantalone
+    assert tipo_capo_da_titolo("Giacca di jeans Levi's") == "capospalla"
+    assert tipo_capo_da_titolo("Cappotto Timberland") == "capospalla"
+    assert tipo_capo_da_titolo("Bomber vintage nero") == "capospalla"
+    assert tipo_capo_da_titolo("Piumino North Face") == "capospalla"
+    # ...ma la camicia resta un top anche se di denim
+    assert tipo_capo_da_titolo("Camicia Lee Western denim nera") == "top"
+
     p = ProfiloUtente(taglie=TaglieUtente(top="L", pantaloni="32", scarpe="47"))
     assert taglie_per_tipo("top", p) == ["L"]
     assert taglie_per_tipo("pantaloni", p) == ["32"]
@@ -317,4 +447,11 @@ if __name__ == "__main__":
         over = asyncio.run(interpreta_ricerca("felpa oversize croppata nera", p))
         print(over)
         assert (over.vestibilita, over.lunghezza) == ("oversize", "corta"), over
+
+        # Il tipo deve coincidere con quello che userebbero feed e /parere sullo stesso capo
+        giacca = asyncio.run(interpreta_ricerca("giacca di jeans, max 40€", p))
+        print(giacca)
+        assert giacca.tipo_capo == "capospalla", giacca
+        pant = asyncio.run(interpreta_ricerca("jeans neri", p))
+        assert pant.tipo_capo == "pantaloni", pant
     print("OK")

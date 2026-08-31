@@ -29,7 +29,7 @@ PROMPT_ANALISI = (
 )
 
 
-def _leggi_immagine(path: Path) -> tuple[str, str]:
+def leggi_immagine(path: Path) -> tuple[str, str]:
     """Legge file immagine e ritorna (base64_data, media_type)."""
     suffisso = path.suffix.lower()
 
@@ -71,7 +71,7 @@ async def descrivi_immagine(path_immagine: str) -> str:
     if not path.exists():
         raise FileNotFoundError(f"Immagine non trovata: {path}")
 
-    b64, media_type = _leggi_immagine(path)
+    b64, media_type = leggi_immagine(path)
 
     client = anthropic.AsyncAnthropic()
     risposta = await client.messages.create(
@@ -117,7 +117,7 @@ async def estrai_capi_da_outfit(path_immagine: str) -> list[str]:
     if not path.exists():
         raise FileNotFoundError(f"Immagine non trovata: {path}")
 
-    b64, media_type = _leggi_immagine(path)
+    b64, media_type = leggi_immagine(path)
 
     client = anthropic.AsyncAnthropic()
     risposta = await client.messages.create(
@@ -157,7 +157,7 @@ async def estrai_stile_da_immagine(path_immagine: str) -> list[str]:
     if not path.exists():
         raise FileNotFoundError(f"Immagine non trovata: {path}")
 
-    b64, media_type = _leggi_immagine(path)
+    b64, media_type = leggi_immagine(path)
 
     client = anthropic.AsyncAnthropic()
     risposta = await client.messages.create(
